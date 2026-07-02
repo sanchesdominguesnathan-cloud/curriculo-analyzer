@@ -1,0 +1,79 @@
+"""
+ranking.py
+Ordena e classifica os candidatos após o cálculo de score,
+e aplica filtros solicitados pela recrutadora.
+"""
+
+import pandas as pd
+
+
+def montar_tabela_resultados(lista_candidatos: list) -> pd.DataFrame:
+    """
+    lista_candidatos: lista de dicionários, cada um contendo os dados
+    extraídos (parser.py) + resultado do score (score.py).
+    Retorna um DataFrame pronto para exibição/ordenação/exportação.
+    """
+    linhas = []
+    for c in lista_candidatos:
+        idiomas_txt = ", ".join(
+            f"{idioma} ({nivel})" for idioma, nivel in c.get("idiomas", {}).items()
+        ) or "Não identificado"
+
+        linhas.append({
+            "Nome": c.get("nome", "Não identificado"),
+            "Pontuação": c.get("score_final", 0),
+            "Compatibilidade (%)": c.get("compatibilidade_percentual", 0),
+            "Experiência": c.get("experiencia_formatada", "Não identificado"),
+            "Experiência (meses)": c.get("experiencia_meses", 0),
+            "Formação": f"{c.get('formacao_nivel') or '-'} - {c.get('formacao_area') or '-'}",
+            "Idiomas": idiomas_txt,
+            "Cidade": c.get("cidade") or "Não identificado",
+            "Status": c.get("status", "Reprovado"),
+            "Email": c.get("email") or "-",
+            "Telefone": c.get("telefone") or "-",
+            "LinkedIn": c.get("linkedin") or "-",
+            "Resumo": c.get("resumo", ""),
+            "Arquivo": c.get("arquivo", ""),
+        })
+
+    df = pd.DataFrame(linhas)
+    if not df.empty:
+        df = df.sort_values(by="Pontuação", ascending=False).reset_index(drop=True)
+        df.insert(0, "Ranking", range(1, len(df) + 1))
+    return df
+
+
+def aplicar_filtros(
+    df: pd.DataFrame,
+    cidade: str = None,
+    experiencia_min_meses: int = None,
+    idioma: str = None,
+    formacao: str = None,
+    pontuacao_minima: float = None,
+    cargo: str = None,
+) -> pd.DataFrame:
+    """Aplica filtros combináveis sobre a tabela de resultados."""
+    resultado = df.copy()
+
+    if cidade:
+        resultado = resultado[resultado["Cidade"].str.contains(cidade, case=False, na=False)]
+
+    if experiencia_min_meses is not None:
+        resultado = resultado[resultado["Experiência (meses)"] >= experiencia_min_meses]
+
+    if idioma:
+        resultado = resultado[resultado["Idiomas"].str.contains(idioma, case=False, na=False)]
+
+    if formacao:
+        resultado = resultado[resultado["Formação"].str.contains(formacao, case=False, na=False)]
+
+    if pontuacao_minima is not None:
+        resultado = resultado[resultado["Pontuação"] >= pontuacao_minima]
+
+    if cargo:
+        resultado = resultado[
+            resultado["Resumo"].str.contains(cargo, case=False, na=False)
+            | resultado["Nome"].str.contains(cargo, case=False, na=False)
+        ]
+
+    return resultado.reset_index(drop=True)
