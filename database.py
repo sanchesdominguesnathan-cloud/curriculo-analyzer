@@ -11,12 +11,24 @@ Responsabilidades:
   sessões.
 """
 
+import os
+import tempfile
 import sqlite3
 import json
 from datetime import datetime
 from contextlib import contextmanager
 
-CAMINHO_BANCO = "data/curriculos.db"
+# No Streamlit Community Cloud, a pasta do repositório é somente leitura.
+# Por isso usamos uma pasta gravável do sistema (tempfile.gettempdir()),
+# que funciona tanto localmente quanto em nuvem.
+# ATENÇÃO: em serviços como o Streamlit Community Cloud, essa pasta é
+# temporária — os dados podem ser apagados quando o app reiniciar/dormir.
+# Para persistência permanente em produção, considere um banco externo
+# (ex: PostgreSQL no Supabase ou Neon).
+PASTA_DADOS = os.path.join(tempfile.gettempdir(), "curriculo_analyzer_data")
+CAMINHO_BANCO = os.path.join(PASTA_DADOS, "curriculos.db")
+
+os.makedirs(PASTA_DADOS, exist_ok=True)
 
 
 @contextmanager
