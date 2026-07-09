@@ -296,23 +296,23 @@ def gerar_pdf_resultados(df: pd.DataFrame) -> bytes:
 
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4))
-
     colunas = ["Ranking", "Nome", "Pontuação", "Status", "Cidade", "Experiência"]
     colunas_presentes = [c for c in colunas if c in df.columns]
     dados_tabela = [colunas_presentes] + df[colunas_presentes].astype(str).values.tolist()
 
     tabela = Table(dados_tabela, repeatRows=1)
-
     tabela.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E79")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("TEXTCOLOR", (0, 1), (-1, -1), colors.black),
-        
-    ]))
-
+     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E79")),
+("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+("FONTSIZE", (0, 0), (-1, -1), 8),
+("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#BDBDBD")),
+("ROWBACKGROUNDS", (0, 1), (-1, -1), [
+    colors.HexColor("#FFFFFF"),
+    colors.HexColor("#EAEAEA")
+      ]),
+]))
     doc.build([tabela])
     return buffer.getvalue()
-
 
 def secao_dashboard(df: pd.DataFrame):
     st.header("7. Dashboard")
