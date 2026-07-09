@@ -304,8 +304,9 @@ def gerar_pdf_resultados(df: pd.DataFrame) -> bytes:
     tabela = Table(dados_tabela, repeatRows=1)
 
     tabela.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E79")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("TEXTCOLOR", (0, 1), (-1, -1), colors.black),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
         
     ]))
 
