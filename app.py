@@ -28,7 +28,7 @@ if "df_resultados" not in st.session_state:
 
 
 def secao_cabecalho():
-    st.title("📄 Análise Automática de Currículos")
+    st.title(" Análise Automática de Currículos")
     st.caption(
         "Faça upload dos currículos, descreva a vaga e cadastre as "
         "palavras-chave. O sistema extrai os dados, pontua e classifica "
