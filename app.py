@@ -302,12 +302,14 @@ def gerar_pdf_resultados(df: pd.DataFrame) -> bytes:
 
     tabela = Table(dados_tabela, repeatRows=1)
     tabela.setStyle(TableStyle([
-       ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-("ALIGN", (0, 0), (-1, -1), "CENTER"),
-("BOTTOMPADDING", (0, 0), (-1, 0), 8),
-("TOPPADDING", (0, 1), (-1, -1), 5),
-("BOTTOMPADDING", (0, 1), (-1, -1), 5),
-
+     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E79")),
+("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+("FONTSIZE", (0, 0), (-1, -1), 8),
+("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#BDBDBD")),
+("ROWBACKGROUNDS", (0, 1), (-1, -1), [
+    colors.HexColor("#FFFFFF"),
+    colors.HexColor("#EAEAEA")
+]),
     doc.build([tabela])
     return buffer.getvalue()
 
