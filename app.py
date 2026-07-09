@@ -302,12 +302,11 @@ def gerar_pdf_resultados(df: pd.DataFrame) -> bytes:
 
     tabela = Table(dados_tabela, repeatRows=1)
     tabela.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#333333")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f2f2")]),
-    ]))
+       ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+("ALIGN", (0, 0), (-1, -1), "CENTER"),
+("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+("TOPPADDING", (0, 1), (-1, -1), 5),
+("BOTTOMPADDING", (0, 1), (-1, -1), 5),
 
     doc.build([tabela])
     return buffer.getvalue()
