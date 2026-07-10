@@ -5,19 +5,40 @@ e aplica filtros solicitados pela recrutadora.
 """
 
 import pandas as pd
+from utils import normalizar_texto
 
 
-def montar_tabela_resultados(lista_candidatos: list) -> pd.DataFrame:
+def montar_tabela_resultados(lista_candidatos: list, cidade_vaga: str = "") -> pd.DataFrame:
     """
     lista_candidatos: lista de dicionários, cada um contendo os dados
     extraídos (parser.py) + resultado do score (score.py).
+    cidade_vaga: cidade onde o trabalho será exercido (opcional). Quando
+    informada, candidatos de outra cidade (ou sem cidade identificada)
+    recebem um alerta numa coluna própria ("Alerta"), sem alterar o texto
+    da cidade em si — isso mantém a exportação (Excel/CSV/PDF) limpa.
     Retorna um DataFrame pronto para exibição/ordenação/exportação.
     """
+    cidade_vaga_norm = normalizar_texto(cidade_vaga) if cidade_vaga else ""
+
     linhas = []
     for c in lista_candidatos:
         idiomas_txt = ", ".join(
             f"{idioma} ({nivel})" for idioma, nivel in c.get("idiomas", {}).items()
         ) or "Não identificado"
+
+        cidade_candidato = c.get("cidade") or ""
+        cidade_exibicao = cidade_candidato or "Não identificado"
+        fora_da_cidade = False
+        alerta_texto = ""
+
+        if cidade_vaga_norm:
+            cidade_candidato_norm = normalizar_texto(cidade_candidato)
+            if not cidade_candidato_norm:
+                fora_da_cidade = True
+                alerta_texto = "⚠️ Cidade não identificada"
+            elif cidade_candidato_norm != cidade_vaga_norm:
+                fora_da_cidade = True
+                alerta_texto = "⚠️ Fora da cidade da vaga"
 
         linhas.append({
             "Nome": c.get("nome", "Não identificado"),
@@ -27,7 +48,9 @@ def montar_tabela_resultados(lista_candidatos: list) -> pd.DataFrame:
             "Experiência (meses)": c.get("experiencia_meses", 0),
             "Formação": f"{c.get('formacao_nivel') or '-'} - {c.get('formacao_area') or '-'}",
             "Idiomas": idiomas_txt,
-            "Cidade": c.get("cidade") or "Não identificado",
+            "Cidade": cidade_exibicao,
+            "Alerta": alerta_texto,
+            "Fora da cidade da vaga": fora_da_cidade,
             "Status": c.get("status", "Reprovado"),
             "Email": c.get("email") or "-",
             "Telefone": c.get("telefone") or "-",

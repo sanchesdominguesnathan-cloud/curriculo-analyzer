@@ -113,19 +113,55 @@ NIVEIS_IDIOMA = {
 }
 
 
+# Títulos de seção comuns que NUNCA devem ser confundidos com o nome do
+# candidato, mesmo quando aparecem nas primeiras linhas do currículo.
+ROTULOS_SECAO_IGNORAR = [
+    "objetivo", "dados pessoais", "informacoes pessoais", "perfil profissional",
+    "perfil", "resumo profissional", "resumo", "sobre mim", "apresentacao",
+    "curriculum vitae", "curriculo", "contato", "formacao academica", "formacao",
+    "experiencia profissional", "experiencia", "idiomas", "competencias",
+    "habilidades", "cursos", "certificacoes", "referencias", "objetivo profissional",
+    "qualificacoes", "identificacao",
+]
+
+
+def _parece_rotulo_de_secao(linha: str) -> bool:
+    """Verifica se a linha é um título de seção (ex: 'Objetivo:', 'Dados Pessoais')
+    em vez de um nome de pessoa."""
+    linha_norm = normalizar_texto(linha).rstrip(":").strip()
+    for rotulo in ROTULOS_SECAO_IGNORAR:
+        if linha_norm == rotulo or linha_norm.startswith(rotulo + ":") or linha_norm.startswith(rotulo + " "):
+            return True
+    return False
+
+
 def extrair_nome(texto: str) -> str:
     """Assume que o nome do candidato está normalmente nas primeiras linhas
-    não vazias do currículo, sem caracteres típicos de email/telefone."""
+    não vazias do currículo, sem caracteres típicos de email/telefone e sem
+    ser um título de seção conhecido (Objetivo, Dados Pessoais etc.)."""
     linhas = [l.strip() for l in texto.splitlines() if l.strip()]
-    for linha in linhas[:6]:
+    candidatos_validos = []
+
+    for linha in linhas[:8]:
         if REGEX_EMAIL.search(linha):
             continue
         if any(char.isdigit() for char in linha):
             continue
+        if _parece_rotulo_de_secao(linha):
+            continue
         palavras = linha.split()
         if 1 < len(palavras) <= 5 and all(p[0].isupper() for p in palavras if p.isalpha()):
+            candidatos_validos.append(linha)
+
+    if candidatos_validos:
+        return candidatos_validos[0].title()
+
+    # Fallback: primeira linha não vazia que também não seja um rótulo de seção
+    for linha in linhas:
+        if not _parece_rotulo_de_secao(linha):
             return linha.title()
-    return linhas[0].title() if linhas else "Não identificado"
+
+    return "Não identificado"
 
 
 def extrair_email(texto: str):
@@ -205,8 +241,47 @@ def extrair_competencias(texto: str, palavras_chave: list):
     return encontradas, evidencias
 
 
+# Cabeçalhos que indicam o início da seção de experiência profissional
+PADRAO_INICIO_EXPERIENCIA = re.compile(
+    r"(experi[êe]ncias?\s+profission(al|ais)|hist[óo]rico\s+profissional|"
+    r"atua[çc][ãa]o\s+profissional|vida\s+profissional|experi[êe]ncias?\s+de\s+trabalho)",
+    re.IGNORECASE
+)
+
+# Cabeçalhos que indicam o fim da seção de experiência (início de outra seção)
+PADRAO_FIM_EXPERIENCIA = re.compile(
+    r"(forma[çc][ãa]o(\s+acad[êe]mica)?|educa[çc][ãa]o|idiomas|cursos(\s+e\s+certifica[çc][õo]es)?|"
+    r"certifica[çc][õo]es|habilidades|compet[êe]ncias|informa[çc][õo]es\s+adicionais|"
+    r"refer[êe]ncias|entidades\s+estudantis|atividades\s+(extracurriculares|complementares)|"
+    r"voluntariado|projetos\s+(sociais|acad[êe]micos))",
+    re.IGNORECASE
+)
+
+
+def isolar_secao_experiencia(texto: str) -> str:
+    """
+    Tenta isolar apenas o trecho do currículo referente à experiência
+    profissional, para evitar que datas de formação, cursos ou entidades
+    estudantis sejam somadas ao cálculo de tempo de experiência.
+
+    Se não conseguir identificar os cabeçalhos, retorna o texto completo
+    (comportamento anterior, usado como fallback de segurança).
+    """
+    match_inicio = PADRAO_INICIO_EXPERIENCIA.search(texto)
+    if not match_inicio:
+        return texto
+
+    inicio_secao = match_inicio.end()
+    match_fim = PADRAO_FIM_EXPERIENCIA.search(texto, pos=inicio_secao)
+    fim_secao = match_fim.start() if match_fim else len(texto)
+
+    trecho = texto[inicio_secao:fim_secao].strip()
+    return trecho if trecho else texto
+
+
 def calcular_experiencia_total(texto: str):
-    periodos = extrair_periodos(texto)
+    secao_experiencia = isolar_secao_experiencia(texto)
+    periodos = extrair_periodos(secao_experiencia)
     total_meses = calcular_meses_experiencia(periodos)
     return total_meses, formatar_experiencia(total_meses)
 

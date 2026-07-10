@@ -45,6 +45,22 @@ def conectar():
 def inicializar_banco():
     with conectar() as conn:
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS vagas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome TEXT UNIQUE NOT NULL,
+                descricao TEXT,
+                obrigatorias_json TEXT,
+                desejaveis_json TEXT,
+                cidade_vaga TEXT,
+                data_criacao TEXT,
+                data_atualizacao TEXT
+            )
+        """)
+        # Migração leve: garante a coluna cidade_vaga em bancos já existentes.
+        colunas_vagas = [c["name"] for c in conn.execute("PRAGMA table_info(vagas)").fetchall()]
+        if "cidade_vaga" not in colunas_vagas:
+            conn.execute("ALTER TABLE vagas ADD COLUMN cidade_vaga TEXT")
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS curriculos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 hash_arquivo TEXT UNIQUE NOT NULL,
@@ -57,9 +73,17 @@ def inicializar_banco():
                 score_final REAL,
                 status TEXT,
                 data_analise TEXT,
-                vaga_descricao TEXT
+                vaga_descricao TEXT,
+                vaga_id INTEGER,
+                FOREIGN KEY (vaga_id) REFERENCES vagas (id)
             )
         """)
+        # Migração leve: garante que a coluna vaga_id exista mesmo em bancos
+        # criados por uma versão anterior do sistema (sem essa coluna).
+        colunas_existentes = [c["name"] for c in conn.execute("PRAGMA table_info(curriculos)").fetchall()]
+        if "vaga_id" not in colunas_existentes:
+            conn.execute("ALTER TABLE curriculos ADD COLUMN vaga_id INTEGER")
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS decisoes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,19 +115,22 @@ def curriculo_ja_analisado(hash_arquivo: str):
         return None
 
 
-def salvar_curriculo(hash_arquivo: str, nome_arquivo: str, dados: dict, vaga_descricao: str = ""):
-    """Salva (ou atualiza) o resultado da análise de um currículo."""
+def salvar_curriculo(hash_arquivo: str, nome_arquivo: str, dados: dict, vaga_descricao: str = "", vaga_id: int = None):
+    """Salva (ou atualiza) o resultado da análise de um currículo, associado
+    a uma vaga (opcional)."""
     with conectar() as conn:
         conn.execute("""
             INSERT INTO curriculos (
                 hash_arquivo, nome_arquivo, nome_candidato, email, telefone,
-                cidade, dados_json, score_final, status, data_analise, vaga_descricao
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cidade, dados_json, score_final, status, data_analise,
+                vaga_descricao, vaga_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(hash_arquivo) DO UPDATE SET
                 dados_json=excluded.dados_json,
                 score_final=excluded.score_final,
                 status=excluded.status,
-                data_analise=excluded.data_analise
+                data_analise=excluded.data_analise,
+                vaga_id=COALESCE(excluded.vaga_id, curriculos.vaga_id)
         """, (
             hash_arquivo,
             nome_arquivo,
@@ -116,6 +143,7 @@ def salvar_curriculo(hash_arquivo: str, nome_arquivo: str, dados: dict, vaga_des
             dados.get("status"),
             datetime.now().isoformat(),
             vaga_descricao,
+            vaga_id,
         ))
         cursor = conn.execute(
             "SELECT id FROM curriculos WHERE hash_arquivo = ?", (hash_arquivo,)
@@ -189,6 +217,86 @@ def listar_todos_curriculos():
         return [dict(linha) for linha in cursor.fetchall()]
 
 
+def listar_curriculos_por_vaga(vaga_id: int):
+    """Retorna os dados completos (já decodificados) de todos os currículos
+    já analisados anteriormente para uma vaga específica — usado para
+    continuar a análise em outro dia sem perder o que já foi feito."""
+    with conectar() as conn:
+        cursor = conn.execute(
+            "SELECT * FROM curriculos WHERE vaga_id = ? ORDER BY score_final DESC", (vaga_id,)
+        )
+        resultados = []
+        for linha in cursor.fetchall():
+            dados = json.loads(linha["dados_json"])
+            dados["_id_banco"] = linha["id"]
+            dados["hash_arquivo"] = linha["hash_arquivo"]
+            resultados.append(dados)
+        return resultados
+
+
+# ---------------------------------------------------------------------------
+# Gerenciamento de Vagas
+# ---------------------------------------------------------------------------
+
+def salvar_vaga(nome: str, descricao: str, palavras_obrigatorias: dict, palavras_desejaveis: dict, cidade_vaga: str = ""):
+    """Cria uma nova vaga ou atualiza uma já existente com o mesmo nome.
+    Retorna o id da vaga."""
+    agora = datetime.now().isoformat()
+    with conectar() as conn:
+        conn.execute("""
+            INSERT INTO vagas (nome, descricao, obrigatorias_json, desejaveis_json, cidade_vaga, data_criacao, data_atualizacao)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(nome) DO UPDATE SET
+                descricao=excluded.descricao,
+                obrigatorias_json=excluded.obrigatorias_json,
+                desejaveis_json=excluded.desejaveis_json,
+                cidade_vaga=excluded.cidade_vaga,
+                data_atualizacao=excluded.data_atualizacao
+        """, (
+            nome,
+            descricao,
+            json.dumps(palavras_obrigatorias, ensure_ascii=False),
+            json.dumps(palavras_desejaveis, ensure_ascii=False),
+            cidade_vaga or "",
+            agora,
+            agora,
+        ))
+        cursor = conn.execute("SELECT id FROM vagas WHERE nome = ?", (nome,))
+        return cursor.fetchone()["id"]
+
+
+def listar_vagas():
+    """Retorna a lista de vagas salvas, mais recentes primeiro."""
+    with conectar() as conn:
+        cursor = conn.execute("SELECT * FROM vagas ORDER BY data_atualizacao DESC")
+        return [dict(linha) for linha in cursor.fetchall()]
+
+
+def obter_vaga(vaga_id: int):
+    """Retorna os dados completos de uma vaga (descrição + palavras-chave com pesos + cidade)."""
+    with conectar() as conn:
+        cursor = conn.execute("SELECT * FROM vagas WHERE id = ?", (vaga_id,))
+        linha = cursor.fetchone()
+        if not linha:
+            return None
+        return {
+            "id": linha["id"],
+            "nome": linha["nome"],
+            "descricao": linha["descricao"] or "",
+            "obrigatorias": json.loads(linha["obrigatorias_json"] or "{}"),
+            "desejaveis": json.loads(linha["desejaveis_json"] or "{}"),
+            "cidade_vaga": linha["cidade_vaga"] or "",
+        }
+
+
+def excluir_vaga(vaga_id: int):
+    """Exclui uma vaga. Os currículos já analisados permanecem no banco,
+    apenas desvinculados da vaga."""
+    with conectar() as conn:
+        conn.execute("UPDATE curriculos SET vaga_id = NULL WHERE vaga_id = ?", (vaga_id,))
+        conn.execute("DELETE FROM vagas WHERE id = ?", (vaga_id,))
+
+
 def salvar_palavra_chave(palavra: str, peso: int, tipo: str = "obrigatoria"):
     with conectar() as conn:
         conn.execute("""
@@ -213,3 +321,4 @@ def limpar_banco():
         conn.execute("DELETE FROM decisoes")
         conn.execute("DELETE FROM curriculos")
         conn.execute("DELETE FROM palavras_chave")
+        conn.execute("DELETE FROM vagas")
