@@ -25,10 +25,83 @@ if "resultados" not in st.session_state:
     st.session_state.resultados = []
 if "df_resultados" not in st.session_state:
     st.session_state.df_resultados = pd.DataFrame()
+if "vaga_id_ativa" not in st.session_state:
+    st.session_state.vaga_id_ativa = None
+if "ultima_vaga_carregada" not in st.session_state:
+    st.session_state.ultima_vaga_carregada = None
+
+
+def secao_vaga():
+    """
+    Permite salvar/carregar 'pastas de vaga': cada vaga guarda descrição,
+    palavras-chave (com pesos) e cidade. Ao reabrir uma vaga já salva, os
+    currículos analisados anteriormente para ela são recuperados
+    automaticamente — útil quando os currículos chegam em dias diferentes.
+    """
+    st.header("0. Pasta da Vaga")
+
+    vagas_salvas = db.listar_vagas()
+    nomes_vagas = [v["nome"] for v in vagas_salvas]
+    opcoes = ["➕ Criar nova vaga"] + nomes_vagas
+
+    col_sel, col_del = st.columns([4, 1])
+    with col_sel:
+        escolha = st.selectbox(
+            "Selecione uma vaga já salva ou crie uma nova",
+            opcoes,
+            key="seletor_vaga",
+        )
+
+    if escolha == "➕ Criar nova vaga":
+        nome_vaga = st.text_input(
+            "Nome desta vaga (ex: 'Analista Financeiro - Julho/2026')",
+            key="nome_nova_vaga",
+        )
+        vaga_ativa = {
+            "id": None, "nome": nome_vaga, "descricao": "",
+            "obrigatorias": {}, "desejaveis": {}, "cidade_vaga": "",
+        }
+        st.session_state.vaga_id_ativa = None
+    else:
+        vaga_selecionada = next(v for v in vagas_salvas if v["nome"] == escolha)
+        vaga_ativa = db.obter_vaga(vaga_selecionada["id"])
+        vaga_ativa["nome"] = escolha
+        st.session_state.vaga_id_ativa = vaga_ativa["id"]
+
+        # Recupera automaticamente os currículos já analisados nesta vaga
+        # (só na primeira vez que a vaga é selecionada nesta sessão, para
+        # não sobrescrever uma análise que o usuário acabou de rodar).
+        if st.session_state.ultima_vaga_carregada != vaga_ativa["id"]:
+            candidatos_salvos = db.listar_curriculos_por_vaga(vaga_ativa["id"])
+            if candidatos_salvos:
+                st.session_state.resultados = candidatos_salvos
+                st.session_state.df_resultados = ranking.montar_tabela_resultados(
+                    candidatos_salvos, cidade_vaga=vaga_ativa.get("cidade_vaga", "")
+                )
+                st.info(
+                    f"📂 Vaga '{escolha}' carregada com {len(candidatos_salvos)} "
+                    "candidato(s) já analisado(s) anteriormente. Envie novos "
+                    "currículos e clique em Analisar para adicionar mais."
+                )
+            st.session_state.ultima_vaga_carregada = vaga_ativa["id"]
+
+        with col_del:
+            st.write("")
+            st.write("")
+            if st.button("🗑️ Excluir vaga", key="excluir_vaga_btn"):
+                db.excluir_vaga(vaga_ativa["id"])
+                st.session_state.vaga_id_ativa = None
+                st.session_state.ultima_vaga_carregada = None
+                st.session_state.resultados = []
+                st.session_state.df_resultados = pd.DataFrame()
+                st.success(f"Vaga '{escolha}' excluída. Os currículos continuam salvos no histórico geral.")
+                st.rerun()
+
+    return vaga_ativa
 
 
 def secao_cabecalho():
-    st.title(" Análise Automática de Currículos")
+    st.title("📄 Análise Automática de Currículos")
     st.caption(
         "Faça upload dos currículos, descreva a vaga e cadastre as "
         "palavras-chave. O sistema extrai os dados, pontua e classifica "
@@ -36,8 +109,10 @@ def secao_cabecalho():
     )
 
 
-def secao_entrada():
+def secao_entrada(vaga_ativa: dict):
     st.header("1. Vaga e Currículos")
+
+    sufixo_widget = f"{vaga_ativa.get('id') or 'nova'}_{vaga_ativa.get('nome', '')}"
 
     col_upload, col_vaga = st.columns([1, 1])
 
@@ -51,9 +126,19 @@ def secao_entrada():
     with col_vaga:
         descricao_vaga = st.text_area(
             "Descrição da vaga",
+            value=vaga_ativa.get("descricao", ""),
             placeholder="Ex: Buscamos um Analista Administrativo com experiência em "
                         "gestão de processos, domínio de Excel e Power BI...",
             height=150,
+            key=f"descricao_vaga_{sufixo_widget}",
+        )
+        cidade_vaga = st.text_input(
+            "📍 Cidade da vaga (opcional)",
+            value=vaga_ativa.get("cidade_vaga", ""),
+            placeholder="Ex: São Paulo",
+            help="Se preenchido, candidatos de outra cidade (ou sem cidade identificada "
+                 "no currículo) recebem um alerta na tabela de resultados.",
+            key=f"cidade_vaga_{sufixo_widget}",
         )
 
     st.subheader("2. Palavras-chave")
@@ -64,25 +149,32 @@ def secao_entrada():
     )
 
     sugestoes = ", ".join(listar_todas_palavras_chave_sugeridas())
+    obrigatorias_padrao = ", ".join(vaga_ativa.get("obrigatorias", {}).keys())
+    desejaveis_padrao = ", ".join(vaga_ativa.get("desejaveis", {}).keys())
 
     col_obg, col_desej = st.columns(2)
     with col_obg:
         texto_obrigatorias = st.text_area(
             "🔴 Palavras-chave OBRIGATÓRIAS (separadas por vírgula)",
+            value=obrigatorias_padrao,
             placeholder=sugestoes,
             height=100,
-            key="input_obrigatorias",
+            key=f"input_obrigatorias_{sufixo_widget}",
         )
     with col_desej:
         texto_desejaveis = st.text_area(
             "🟡 Palavras-chave DESEJÁVEIS (separadas por vírgula)",
+            value=desejaveis_padrao,
             placeholder="Ex: Inglês, Liderança, Comunicação",
             height=100,
-            key="input_desejaveis",
+            key=f"input_desejaveis_{sufixo_widget}",
         )
 
     palavras_obrigatorias_lista = [p.strip() for p in texto_obrigatorias.split(",") if p.strip()]
     palavras_desejaveis_lista = [p.strip() for p in texto_desejaveis.split(",") if p.strip()]
+
+    pesos_salvos_obrig = vaga_ativa.get("obrigatorias", {})
+    pesos_salvos_desej = vaga_ativa.get("desejaveis", {})
 
     pesos_obrigatorias, pesos_desejaveis = {}, {}
 
@@ -93,33 +185,49 @@ def secao_entrada():
                 st.markdown("**Obrigatórias**")
                 cols = st.columns(min(4, len(palavras_obrigatorias_lista)) or 1)
                 for i, palavra in enumerate(palavras_obrigatorias_lista):
-                    peso_padrao = PESOS_PADRAO.get(palavra.lower().strip(), 8)
+                    peso_padrao = pesos_salvos_obrig.get(palavra, PESOS_PADRAO.get(palavra.lower().strip(), 8))
                     with cols[i % len(cols)]:
                         pesos_obrigatorias[palavra] = st.slider(
-                            palavra, 1, 10, peso_padrao, key=f"peso_obg_{palavra}"
+                            palavra, 1, 10, peso_padrao, key=f"peso_obg_{sufixo_widget}_{palavra}"
                         )
             if palavras_desejaveis_lista:
                 st.markdown("**Desejáveis**")
                 cols = st.columns(min(4, len(palavras_desejaveis_lista)) or 1)
                 for i, palavra in enumerate(palavras_desejaveis_lista):
-                    peso_padrao = PESOS_PADRAO.get(palavra.lower().strip(), 5)
+                    peso_padrao = pesos_salvos_desej.get(palavra, PESOS_PADRAO.get(palavra.lower().strip(), 5))
                     with cols[i % len(cols)]:
                         pesos_desejaveis[palavra] = st.slider(
-                            palavra, 1, 10, peso_padrao, key=f"peso_dej_{palavra}"
+                            palavra, 1, 10, peso_padrao, key=f"peso_dej_{sufixo_widget}_{palavra}"
                         )
     else:
         pesos_obrigatorias = {}
         pesos_desejaveis = {}
 
     if not pesos_obrigatorias:
-        pesos_obrigatorias = {p: PESOS_PADRAO.get(p.lower().strip(), 8) for p in palavras_obrigatorias_lista}
+        pesos_obrigatorias = {
+            p: pesos_salvos_obrig.get(p, PESOS_PADRAO.get(p.lower().strip(), 8)) for p in palavras_obrigatorias_lista
+        }
     if not pesos_desejaveis:
-        pesos_desejaveis = {p: PESOS_PADRAO.get(p.lower().strip(), 5) for p in palavras_desejaveis_lista}
+        pesos_desejaveis = {
+            p: pesos_salvos_desej.get(p, PESOS_PADRAO.get(p.lower().strip(), 5)) for p in palavras_desejaveis_lista
+        }
 
-    return arquivos, descricao_vaga, pesos_obrigatorias, pesos_desejaveis
+    nome_para_salvar = vaga_ativa.get("nome") or ""
+    if st.button("💾 Salvar esta vaga (descrição, palavras-chave e cidade)", key=f"salvar_vaga_{sufixo_widget}"):
+        if not nome_para_salvar.strip():
+            st.error("Dê um nome para a vaga antes de salvar (campo acima do upload).")
+        else:
+            novo_id = db.salvar_vaga(
+                nome_para_salvar.strip(), descricao_vaga, pesos_obrigatorias, pesos_desejaveis, cidade_vaga
+            )
+            st.session_state.vaga_id_ativa = novo_id
+            st.success(f"Vaga '{nome_para_salvar}' salva! Você pode voltar nela quando quiser, em outro dia.")
+            st.rerun()
+
+    return arquivos, descricao_vaga, cidade_vaga, pesos_obrigatorias, pesos_desejaveis
 
 
-def processar_analise(arquivos, descricao_vaga, pesos_obrigatorias, pesos_desejaveis):
+def processar_analise(arquivos, descricao_vaga, cidade_vaga, pesos_obrigatorias, pesos_desejaveis, vaga_id=None):
     if not arquivos:
         st.warning("Envie ao menos um currículo antes de analisar.")
         return
@@ -128,7 +236,7 @@ def processar_analise(arquivos, descricao_vaga, pesos_obrigatorias, pesos_deseja
     if not todas_palavras:
         todas_palavras = listar_todas_palavras_chave_sugeridas()
 
-    resultados = []
+    novos_resultados = []
     barra = st.progress(0, text="Iniciando análise...")
 
     for i, arquivo in enumerate(arquivos):
@@ -139,7 +247,7 @@ def processar_analise(arquivos, descricao_vaga, pesos_obrigatorias, pesos_deseja
         ja_analisado = db.curriculo_ja_analisado(hash_arquivo)
         if ja_analisado:
             st.info(f"⏭️ '{arquivo.name}' já havia sido analisado anteriormente. Reaproveitando resultado salvo.")
-            resultados.append(ja_analisado)
+            novos_resultados.append(ja_analisado)
             continue
 
         try:
@@ -157,14 +265,23 @@ def processar_analise(arquivos, descricao_vaga, pesos_obrigatorias, pesos_deseja
         dados["hash_arquivo"] = hash_arquivo
         dados["conteudo_bytes"] = conteudo_bytes
 
-        id_banco = db.salvar_curriculo(hash_arquivo, arquivo.name, dados, descricao_vaga)
+        id_banco = db.salvar_curriculo(hash_arquivo, arquivo.name, dados, descricao_vaga, vaga_id=vaga_id)
         dados["_id_banco"] = id_banco
 
-        resultados.append(dados)
+        novos_resultados.append(dados)
 
     barra.progress(1.0, text="Análise concluída!")
-    st.session_state.resultados = resultados
-    st.session_state.df_resultados = ranking.montar_tabela_resultados(resultados)
+
+    # Mescla com resultados já carregados na sessão (ex: candidatos de dias
+    # anteriores desta mesma vaga), evitando duplicar pelo hash do arquivo.
+    resultados_por_hash = {r.get("hash_arquivo"): r for r in st.session_state.resultados if r.get("hash_arquivo")}
+    for r in novos_resultados:
+        resultados_por_hash[r.get("hash_arquivo")] = r
+    resultados_final = list(resultados_por_hash.values())
+
+    st.session_state.resultados = resultados_final
+    st.session_state.cidade_vaga_atual = cidade_vaga
+    st.session_state.df_resultados = ranking.montar_tabela_resultados(resultados_final, cidade_vaga=cidade_vaga)
 
 
 def secao_filtros(df: pd.DataFrame):
@@ -183,7 +300,13 @@ def secao_filtros(df: pd.DataFrame):
     with col6:
         cargo = st.text_input("Cargo/palavra no resumo")
 
-    return ranking.aplicar_filtros(
+    somente_mesma_cidade = False
+    if "Fora da cidade da vaga" in df.columns and df["Fora da cidade da vaga"].any():
+        somente_mesma_cidade = st.checkbox(
+            "📍 Mostrar apenas candidatos da cidade da vaga (ocultar quem tem alerta)"
+        )
+
+    df_filtrado = ranking.aplicar_filtros(
         df,
         cidade=cidade or None,
         experiencia_min_meses=experiencia_min or None,
@@ -193,13 +316,26 @@ def secao_filtros(df: pd.DataFrame):
         cargo=cargo or None,
     )
 
+    if somente_mesma_cidade and "Fora da cidade da vaga" in df_filtrado.columns:
+        df_filtrado = df_filtrado[~df_filtrado["Fora da cidade da vaga"]].reset_index(drop=True)
+
+    return df_filtrado
+
 
 def cor_status(status):
+    # OBS: o componente de tabela do Streamlit aplica cor de FUNDO do Styler,
+    # mas ignora a cor da LETRA. Por isso usamos fundos escuros e saturados,
+    # que mantêm boa legibilidade com o texto claro padrão do tema.
     return {
-        "Aprovado": "background-color: #d4edda",
-        "Talvez": "background-color: #fff3cd",
-        "Reprovado": "background-color: #f8d7da",
+        "Aprovado": "background-color: #1e5631; color: #ffffff",
+        "Talvez": "background-color: #7a5c00; color: #ffffff",
+        "Reprovado": "background-color: #7a1f1f; color: #ffffff",
     }.get(status, "")
+
+
+def texto_status_com_icone(status):
+    icones = {"Aprovado": "✅ Aprovado", "Talvez": "⚠️ Talvez", "Reprovado": "❌ Reprovado"}
+    return icones.get(status, status)
 
 
 def secao_resultados(df_filtrado: pd.DataFrame):
@@ -208,15 +344,26 @@ def secao_resultados(df_filtrado: pd.DataFrame):
         st.info("Nenhum resultado para exibir com os filtros atuais.")
         return
 
+    tem_alerta_cidade = "Alerta" in df_filtrado.columns and (df_filtrado["Alerta"] != "").any()
+    if tem_alerta_cidade:
+        qtd_alertas = int((df_filtrado["Alerta"] != "").sum())
+        st.warning(
+            f"⚠️ {qtd_alertas} candidato(s) fora da cidade da vaga (ou sem cidade identificada). "
+            "Veja a coluna 'Alerta' na tabela abaixo."
+        )
+
     colunas_exibicao = [
         "Ranking", "Nome", "Pontuação", "Compatibilidade (%)", "Experiência",
-        "Formação", "Idiomas", "Cidade", "Status"
+        "Formação", "Idiomas", "Cidade", "Alerta", "Status"
     ]
-    df_exibicao = df_filtrado[colunas_exibicao]
+    colunas_exibicao = [c for c in colunas_exibicao if c in df_filtrado.columns]
+    df_exibicao = df_filtrado[colunas_exibicao].copy()
+    df_exibicao["Status"] = df_exibicao["Status"].apply(texto_status_com_icone)
 
     st.dataframe(
         df_exibicao.style.apply(
-            lambda linha: [cor_status(linha["Status"])] * len(linha), axis=1
+            lambda linha: [cor_status(linha["Status"].replace("✅ ", "").replace("⚠️ ", "").replace("❌ ", ""))] * len(linha),
+            axis=1,
         ),
         use_container_width=True,
         height=420,
@@ -296,23 +443,28 @@ def gerar_pdf_resultados(df: pd.DataFrame) -> bytes:
 
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4))
-    colunas = ["Ranking", "Nome", "Pontuação", "Status", "Cidade", "Experiência"]
+    colunas = ["Ranking", "Nome", "Pontuação", "Status", "Cidade", "Alerta", "Experiência"]
     colunas_presentes = [c for c in colunas if c in df.columns]
-    dados_tabela = [colunas_presentes] + df[colunas_presentes].astype(str).values.tolist()
+
+    df_pdf = df[colunas_presentes].copy()
+    if "Alerta" in df_pdf.columns:
+        # Remove o emoji (fontes padrão do PDF podem não renderizá-lo corretamente)
+        df_pdf["Alerta"] = df_pdf["Alerta"].str.replace("⚠️ ", "", regex=False)
+
+    dados_tabela = [colunas_presentes] + df_pdf.astype(str).values.tolist()
 
     tabela = Table(dados_tabela, repeatRows=1)
     tabela.setStyle(TableStyle([
-     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E79")),
-("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-("FONTSIZE", (0, 0), (-1, -1), 8),
-("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#BDBDBD")),
-("ROWBACKGROUNDS", (0, 1), (-1, -1), [
-    colors.HexColor("#FFFFFF"),
-    colors.HexColor("#EAEAEA")
-      ]),
-]))
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#333333")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f2f2")]),
+    ]))
+
     doc.build([tabela])
     return buffer.getvalue()
+
 
 def secao_dashboard(df: pd.DataFrame):
     st.header("7. Dashboard")
@@ -355,11 +507,25 @@ def secao_dashboard(df: pd.DataFrame):
 
 def main():
     secao_cabecalho()
-    arquivos, descricao_vaga, pesos_obrigatorias, pesos_desejaveis = secao_entrada()
+    vaga_ativa = secao_vaga()
+    arquivos, descricao_vaga, cidade_vaga, pesos_obrigatorias, pesos_desejaveis = secao_entrada(vaga_ativa)
 
     st.header("3. Análise")
     if st.button("🔎 Analisar", type="primary"):
-        processar_analise(arquivos, descricao_vaga, pesos_obrigatorias, pesos_desejaveis)
+        vaga_id_para_salvar = st.session_state.vaga_id_ativa
+        # Se a vaga ainda não foi salva explicitamente mas tem um nome
+        # preenchido, salva automaticamente antes de analisar, para já
+        # vincular os currículos a ela.
+        if vaga_id_para_salvar is None and (vaga_ativa.get("nome") or "").strip():
+            vaga_id_para_salvar = db.salvar_vaga(
+                vaga_ativa["nome"].strip(), descricao_vaga, pesos_obrigatorias, pesos_desejaveis, cidade_vaga
+            )
+            st.session_state.vaga_id_ativa = vaga_id_para_salvar
+
+        processar_analise(
+            arquivos, descricao_vaga, cidade_vaga, pesos_obrigatorias, pesos_desejaveis,
+            vaga_id=vaga_id_para_salvar,
+        )
 
     if not st.session_state.df_resultados.empty:
         df_filtrado = secao_filtros(st.session_state.df_resultados)
