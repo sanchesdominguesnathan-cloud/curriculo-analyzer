@@ -253,6 +253,7 @@ PADRAO_FIM_EXPERIENCIA = re.compile(
     r"(forma[çc][ãa]o(\s+acad[êe]mica)?|educa[çc][ãa]o|idiomas|cursos(\s+e\s+certifica[çc][õo]es)?|"
     r"certifica[çc][õo]es|habilidades|compet[êe]ncias|informa[çc][õo]es\s+adicionais|"
     r"refer[êe]ncias|entidades\s+estudantis|atividades\s+(extracurriculares|complementares)|"
+    r"experi[êe]ncias?\s+extracurricular(es)?|experi[êe]ncias?\s+acad[êe]mica(s)?|"
     r"voluntariado|projetos\s+(sociais|acad[êe]micos))",
     re.IGNORECASE
 )
