@@ -12,6 +12,7 @@ import plotly.express as px
 import io
 
 import database as db
+import auth
 import parser as curriculo_parser
 import score as score_module
 import ranking
@@ -19,7 +20,16 @@ from keywords import listar_todas_palavras_chave_sugeridas, BASE_SINONIMOS, PESO
 from utils import gerar_hash_arquivo, gerar_resumo_candidato
 
 st.set_page_config(page_title="Análise Automática de Currículos", layout="wide")
-db.inicializar_banco()
+try:
+    db.inicializar_banco()
+except Exception as e:
+    st.error(
+        "⚠️ Não foi possível conectar ao banco de dados. Verifique se a "
+        "variável `DATABASE_URL` está configurada corretamente nos Secrets "
+        "do Streamlit Cloud (Manage app → Settings → Secrets)."
+    )
+    st.caption(f"Detalhe técnico: {e}")
+    st.stop()
 
 if "resultados" not in st.session_state:
     st.session_state.resultados = []
@@ -29,18 +39,85 @@ if "vaga_id_ativa" not in st.session_state:
     st.session_state.vaga_id_ativa = None
 if "ultima_vaga_carregada" not in st.session_state:
     st.session_state.ultima_vaga_carregada = None
+if "empresa_logada" not in st.session_state:
+    st.session_state.empresa_logada = None
 
 
-def secao_vaga():
+def _obter_codigo_cadastro():
+    """Código de acesso exigido para criar uma nova conta de empresa —
+    evita que qualquer pessoa que ache o link crie uma conta sozinha.
+    Configurado em .streamlit/secrets.toml como CODIGO_CADASTRO."""
+    try:
+        return st.secrets.get("CODIGO_CADASTRO", None)
+    except Exception:
+        return None
+
+
+def tela_login():
+    """Tela de login/cadastro exibida antes de qualquer acesso ao sistema.
+    Retorna True se a empresa está autenticada nesta sessão."""
+    st.title("📄 Análise Automática de Currículos")
+    st.caption("Acesso restrito. Faça login para continuar.")
+
+    aba_login, aba_cadastro = st.tabs(["🔑 Entrar", "🆕 Criar conta"])
+
+    with aba_login:
+        with st.form("form_login"):
+            email = st.text_input("E-mail")
+            senha = st.text_input("Senha", type="password")
+            enviar = st.form_submit_button("Entrar", type="primary")
+        if enviar:
+            empresa = db.autenticar_empresa(email, senha)
+            if empresa:
+                st.session_state.empresa_logada = empresa
+                st.rerun()
+            else:
+                st.error("E-mail ou senha incorretos, ou conta desativada.")
+
+    with aba_cadastro:
+        codigo_esperado = _obter_codigo_cadastro()
+        with st.form("form_cadastro"):
+            nome_empresa = st.text_input("Nome da empresa")
+            email_cadastro = st.text_input("E-mail (será seu login)")
+            senha_cadastro = st.text_input("Senha (mín. 8 caracteres, com maiúscula e número)", type="password")
+            senha_confirmacao = st.text_input("Confirme a senha", type="password")
+            codigo_digitado = None
+            if codigo_esperado:
+                codigo_digitado = st.text_input("Código de acesso (fornecido por quem vendeu a ferramenta)")
+            criar = st.form_submit_button("Criar conta")
+
+        if criar:
+            if codigo_esperado and codigo_digitado != codigo_esperado:
+                st.error("Código de acesso inválido.")
+            elif not nome_empresa.strip() or not email_cadastro.strip():
+                st.error("Preencha o nome da empresa e o e-mail.")
+            elif senha_cadastro != senha_confirmacao:
+                st.error("As senhas não coincidem.")
+            else:
+                senha_ok, motivo = auth.senha_e_forte(senha_cadastro)
+                if not senha_ok:
+                    st.error(motivo)
+                else:
+                    try:
+                        db.criar_empresa(nome_empresa.strip(), email_cadastro.strip(), senha_cadastro)
+                        st.success("Conta criada! Vá para a aba 'Entrar' e faça login.")
+                    except ValueError as e:
+                        st.error(str(e))
+
+    return False
+
+
+def secao_vaga(empresa_id: int):
     """
     Permite salvar/carregar 'pastas de vaga': cada vaga guarda descrição,
     palavras-chave (com pesos) e cidade. Ao reabrir uma vaga já salva, os
     currículos analisados anteriormente para ela são recuperados
     automaticamente — útil quando os currículos chegam em dias diferentes.
+    Tudo isolado pela empresa logada (empresa_id).
     """
     st.header("0. Pasta da Vaga")
 
-    vagas_salvas = db.listar_vagas()
+    vagas_salvas = db.listar_vagas(empresa_id)
     nomes_vagas = [v["nome"] for v in vagas_salvas]
     opcoes = ["➕ Criar nova vaga"] + nomes_vagas
 
@@ -62,40 +139,51 @@ def secao_vaga():
             "obrigatorias": {}, "desejaveis": {}, "cidade_vaga": "",
         }
         st.session_state.vaga_id_ativa = None
+        chave_vaga_atual = "NOVA_VAGA"
     else:
         vaga_selecionada = next(v for v in vagas_salvas if v["nome"] == escolha)
-        vaga_ativa = db.obter_vaga(vaga_selecionada["id"])
+        vaga_ativa = db.obter_vaga(empresa_id, vaga_selecionada["id"])
         vaga_ativa["nome"] = escolha
         st.session_state.vaga_id_ativa = vaga_ativa["id"]
-
-        # Recupera automaticamente os currículos já analisados nesta vaga
-        # (só na primeira vez que a vaga é selecionada nesta sessão, para
-        # não sobrescrever uma análise que o usuário acabou de rodar).
-        if st.session_state.ultima_vaga_carregada != vaga_ativa["id"]:
-            candidatos_salvos = db.listar_curriculos_por_vaga(vaga_ativa["id"])
-            if candidatos_salvos:
-                st.session_state.resultados = candidatos_salvos
-                st.session_state.df_resultados = ranking.montar_tabela_resultados(
-                    candidatos_salvos, cidade_vaga=vaga_ativa.get("cidade_vaga", "")
-                )
-                st.info(
-                    f"📂 Vaga '{escolha}' carregada com {len(candidatos_salvos)} "
-                    "candidato(s) já analisado(s) anteriormente. Envie novos "
-                    "currículos e clique em Analisar para adicionar mais."
-                )
-            st.session_state.ultima_vaga_carregada = vaga_ativa["id"]
+        chave_vaga_atual = vaga_ativa["id"]
 
         with col_del:
             st.write("")
             st.write("")
             if st.button("🗑️ Excluir vaga", key="excluir_vaga_btn"):
-                db.excluir_vaga(vaga_ativa["id"])
+                db.excluir_vaga(empresa_id, vaga_ativa["id"])
                 st.session_state.vaga_id_ativa = None
                 st.session_state.ultima_vaga_carregada = None
                 st.session_state.resultados = []
                 st.session_state.df_resultados = pd.DataFrame()
                 st.success(f"Vaga '{escolha}' excluída. Os currículos continuam salvos no histórico geral.")
                 st.rerun()
+
+    # Sempre que a vaga selecionada MUDA (seja para outra vaga já salva, seja
+    # para "Nova vaga"), a tela de resultados é recarregada do zero: com os
+    # candidatos daquela vaga (se houver), ou vazia (se for uma vaga nova ou
+    # ainda sem candidatos). Isso evita que candidatos de uma vaga apareçam
+    # misturados na análise de outra.
+    if st.session_state.ultima_vaga_carregada != chave_vaga_atual:
+        if vaga_ativa["id"] is not None:
+            candidatos_salvos = db.listar_curriculos_por_vaga(empresa_id, vaga_ativa["id"])
+        else:
+            candidatos_salvos = []
+
+        st.session_state.resultados = candidatos_salvos
+        if candidatos_salvos:
+            st.session_state.df_resultados = ranking.montar_tabela_resultados(
+                candidatos_salvos, cidade_vaga=vaga_ativa.get("cidade_vaga", "")
+            )
+            st.info(
+                f"📂 Vaga '{escolha}' carregada com {len(candidatos_salvos)} "
+                "candidato(s) já analisado(s) anteriormente. Envie novos "
+                "currículos e clique em Analisar para adicionar mais."
+            )
+        else:
+            st.session_state.df_resultados = pd.DataFrame()
+
+        st.session_state.ultima_vaga_carregada = chave_vaga_atual
 
     return vaga_ativa
 
@@ -109,7 +197,7 @@ def secao_cabecalho():
     )
 
 
-def secao_entrada(vaga_ativa: dict):
+def secao_entrada(empresa_id: int, vaga_ativa: dict):
     st.header("1. Vaga e Currículos")
 
     sufixo_widget = f"{vaga_ativa.get('id') or 'nova'}_{vaga_ativa.get('nome', '')}"
@@ -218,7 +306,7 @@ def secao_entrada(vaga_ativa: dict):
             st.error("Dê um nome para a vaga antes de salvar (campo acima do upload).")
         else:
             novo_id = db.salvar_vaga(
-                nome_para_salvar.strip(), descricao_vaga, pesos_obrigatorias, pesos_desejaveis, cidade_vaga
+                empresa_id, nome_para_salvar.strip(), descricao_vaga, pesos_obrigatorias, pesos_desejaveis, cidade_vaga
             )
             st.session_state.vaga_id_ativa = novo_id
             st.success(f"Vaga '{nome_para_salvar}' salva! Você pode voltar nela quando quiser, em outro dia.")
@@ -227,7 +315,7 @@ def secao_entrada(vaga_ativa: dict):
     return arquivos, descricao_vaga, cidade_vaga, pesos_obrigatorias, pesos_desejaveis
 
 
-def processar_analise(arquivos, descricao_vaga, cidade_vaga, pesos_obrigatorias, pesos_desejaveis, vaga_id=None):
+def processar_analise(empresa_id, arquivos, descricao_vaga, cidade_vaga, pesos_obrigatorias, pesos_desejaveis, vaga_id=None):
     if not arquivos:
         st.warning("Envie ao menos um currículo antes de analisar.")
         return
@@ -244,7 +332,7 @@ def processar_analise(arquivos, descricao_vaga, cidade_vaga, pesos_obrigatorias,
         conteudo_bytes = arquivo.getvalue()
         hash_arquivo = gerar_hash_arquivo(conteudo_bytes)
 
-        ja_analisado = db.curriculo_ja_analisado(hash_arquivo)
+        ja_analisado = db.curriculo_ja_analisado(empresa_id, hash_arquivo)
         if ja_analisado:
             st.info(f"⏭️ '{arquivo.name}' já havia sido analisado anteriormente. Reaproveitando resultado salvo.")
             novos_resultados.append(ja_analisado)
@@ -256,7 +344,7 @@ def processar_analise(arquivos, descricao_vaga, cidade_vaga, pesos_obrigatorias,
             st.error(str(e))
             continue
 
-        ajuste = db.calcular_ajuste_aprendizado(dados.get("competencias_encontradas", []))
+        ajuste = db.calcular_ajuste_aprendizado(empresa_id, dados.get("competencias_encontradas", []))
         resultado_score = score_module.calcular_score_final(
             dados, pesos_obrigatorias, pesos_desejaveis, ajuste_aprendizado=ajuste
         )
@@ -265,7 +353,7 @@ def processar_analise(arquivos, descricao_vaga, cidade_vaga, pesos_obrigatorias,
         dados["hash_arquivo"] = hash_arquivo
         dados["conteudo_bytes"] = conteudo_bytes
 
-        id_banco = db.salvar_curriculo(hash_arquivo, arquivo.name, dados, descricao_vaga, vaga_id=vaga_id)
+        id_banco = db.salvar_curriculo(empresa_id, hash_arquivo, arquivo.name, dados, descricao_vaga, vaga_id=vaga_id)
         dados["_id_banco"] = id_banco
 
         novos_resultados.append(dados)
@@ -506,9 +594,27 @@ def secao_dashboard(df: pd.DataFrame):
 
 
 def main():
+    if not st.session_state.empresa_logada:
+        tela_login()
+        return
+
+    empresa = st.session_state.empresa_logada
+    empresa_id = empresa["id"]
+
+    col_titulo, col_logout = st.columns([5, 1])
+    with col_logout:
+        st.write("")
+        if st.button(f"🚪 Sair ({empresa['nome']})"):
+            st.session_state.empresa_logada = None
+            st.session_state.resultados = []
+            st.session_state.df_resultados = pd.DataFrame()
+            st.session_state.vaga_id_ativa = None
+            st.session_state.ultima_vaga_carregada = None
+            st.rerun()
+
     secao_cabecalho()
-    vaga_ativa = secao_vaga()
-    arquivos, descricao_vaga, cidade_vaga, pesos_obrigatorias, pesos_desejaveis = secao_entrada(vaga_ativa)
+    vaga_ativa = secao_vaga(empresa_id)
+    arquivos, descricao_vaga, cidade_vaga, pesos_obrigatorias, pesos_desejaveis = secao_entrada(empresa_id, vaga_ativa)
 
     st.header("3. Análise")
     if st.button("🔎 Analisar", type="primary"):
@@ -518,12 +624,12 @@ def main():
         # vincular os currículos a ela.
         if vaga_id_para_salvar is None and (vaga_ativa.get("nome") or "").strip():
             vaga_id_para_salvar = db.salvar_vaga(
-                vaga_ativa["nome"].strip(), descricao_vaga, pesos_obrigatorias, pesos_desejaveis, cidade_vaga
+                empresa_id, vaga_ativa["nome"].strip(), descricao_vaga, pesos_obrigatorias, pesos_desejaveis, cidade_vaga
             )
             st.session_state.vaga_id_ativa = vaga_id_para_salvar
 
         processar_analise(
-            arquivos, descricao_vaga, cidade_vaga, pesos_obrigatorias, pesos_desejaveis,
+            empresa_id, arquivos, descricao_vaga, cidade_vaga, pesos_obrigatorias, pesos_desejaveis,
             vaga_id=vaga_id_para_salvar,
         )
 
