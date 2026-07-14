@@ -56,10 +56,10 @@ def _obter_codigo_cadastro():
 def tela_login():
     """Tela de login/cadastro exibida antes de qualquer acesso ao sistema.
     Retorna True se a empresa está autenticada nesta sessão."""
-    st.title("📄 Análise Automática de Currículos")
+    st.title(" Análise Automática de Currículos")
     st.caption("Acesso restrito. Faça login para continuar.")
 
-    aba_login, aba_cadastro = st.tabs(["🔑 Entrar", "🆕 Criar conta"])
+    aba_login, aba_cadastro = st.tabs([" Entrar", "🆕 Criar conta"])
 
     with aba_login:
         with st.form("form_login"):
@@ -129,7 +129,7 @@ def secao_vaga(empresa_id: int):
             key="seletor_vaga",
         )
 
-    if escolha == "➕ Criar nova vaga":
+    if escolha == "Criar nova vaga":
         nome_vaga = st.text_input(
             "Nome desta vaga (ex: 'Analista Financeiro - Julho/2026')",
             key="nome_nova_vaga",
@@ -189,7 +189,7 @@ def secao_vaga(empresa_id: int):
 
 
 def secao_cabecalho():
-    st.title("📄 Análise Automática de Currículos")
+    st.title(" Análise Automática de Currículos")
     st.caption(
         "Faça upload dos currículos, descreva a vaga e cadastre as "
         "palavras-chave. O sistema extrai os dados, pontua e classifica "
@@ -221,7 +221,7 @@ def secao_entrada(empresa_id: int, vaga_ativa: dict):
             key=f"descricao_vaga_{sufixo_widget}",
         )
         cidade_vaga = st.text_input(
-            "📍 Cidade da vaga (opcional)",
+            " Cidade da vaga (opcional)",
             value=vaga_ativa.get("cidade_vaga", ""),
             placeholder="Ex: São Paulo",
             help="Se preenchido, candidatos de outra cidade (ou sem cidade identificada "
@@ -301,7 +301,7 @@ def secao_entrada(empresa_id: int, vaga_ativa: dict):
         }
 
     nome_para_salvar = vaga_ativa.get("nome") or ""
-    if st.button("💾 Salvar esta vaga (descrição, palavras-chave e cidade)", key=f"salvar_vaga_{sufixo_widget}"):
+    if st.button("Salvar esta vaga (descrição, palavras-chave e cidade)", key=f"salvar_vaga_{sufixo_widget}"):
         if not nome_para_salvar.strip():
             st.error("Dê um nome para a vaga antes de salvar (campo acima do upload).")
         else:
@@ -604,7 +604,7 @@ def main():
     col_titulo, col_logout = st.columns([5, 1])
     with col_logout:
         st.write("")
-        if st.button(f"🚪 Sair ({empresa['nome']})"):
+        if st.button(f" Sair ({empresa['nome']})"):
             st.session_state.empresa_logada = None
             st.session_state.resultados = []
             st.session_state.df_resultados = pd.DataFrame()
@@ -617,7 +617,7 @@ def main():
     arquivos, descricao_vaga, cidade_vaga, pesos_obrigatorias, pesos_desejaveis = secao_entrada(empresa_id, vaga_ativa)
 
     st.header("3. Análise")
-    if st.button("🔎 Analisar", type="primary"):
+    if st.button(" Analisar", type="primary"):
         vaga_id_para_salvar = st.session_state.vaga_id_ativa
         # Se a vaga ainda não foi salva explicitamente mas tem um nome
         # preenchido, salva automaticamente antes de analisar, para já
