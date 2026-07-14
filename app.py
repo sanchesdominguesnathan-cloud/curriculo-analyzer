@@ -115,7 +115,7 @@ def secao_vaga(empresa_id: int):
     automaticamente — útil quando os currículos chegam em dias diferentes.
     Tudo isolado pela empresa logada (empresa_id).
     """
-    st.header("0. Pasta da Vaga")
+    st.header(" Pasta da Vaga")
 
     vagas_salvas = db.listar_vagas(empresa_id)
     nomes_vagas = [v["nome"] for v in vagas_salvas]
