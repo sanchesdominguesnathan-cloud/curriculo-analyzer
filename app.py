@@ -129,7 +129,7 @@ def secao_vaga(empresa_id: int):
             key="seletor_vaga",
         )
 
-    if escolha == "Criar nova vaga":
+    if escolha == "➕ Criar nova vaga":
         nome_vaga = st.text_input(
             "Nome desta vaga (ex: 'Analista Financeiro - Julho/2026')",
             key="nome_nova_vaga",
