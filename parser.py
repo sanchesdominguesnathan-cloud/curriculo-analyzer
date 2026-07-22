@@ -34,7 +34,6 @@ def extrair_texto_pdf(arquivo_bytes: bytes) -> str:
 
 def extrair_texto_docx(arquivo_bytes: bytes) -> str:
     documento = docx.Document(io.BytesIO(arquivo_bytes))
-    # Parágrafos primeiro — o nome quase sempre está fora da tabela
     partes = [p.text for p in documento.paragraphs if p.text.strip()]
     for tabela in documento.tables:
         for linha in tabela.rows:
@@ -64,8 +63,6 @@ REGEX_TELEFONE = re.compile(
 )
 REGEX_LINKEDIN = re.compile(r"(?:linkedin\.com/in/[a-zA-Z0-9\-_/]+)", re.IGNORECASE)
 
-# Correção #20: transformado em dict {texto_normalizado: nome_original}
-# para busca O(1) ao invés de O(n) na lista.
 _CIDADES_COMUNS_LISTA = [
     "São Paulo", "Rio de Janeiro", "Belo Horizonte", "Curitiba", "Porto Alegre",
     "Salvador", "Fortaleza", "Recife", "Brasília", "Campinas", "Florianópolis",
@@ -77,15 +74,12 @@ _CIDADES_COMUNS_LISTA = [
 ]
 CIDADES_COMUNS = {normalizar_texto(c): c for c in _CIDADES_COMUNS_LISTA}
 
-# Siglas válidas de estados brasileiros para validar o padrão Cidade - UF
 SIGLAS_ESTADO = {
     "AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS",
     "MG","PA","PB","PR","PE","PI","RJ","RN","RS","RO","RR","SC",
     "SP","SE","TO",
 }
 
-# Ordenado do nível mais alto para o mais baixo para evitar falsos positivos
-# (ex: "técnico" aparecendo antes de "graduação" no texto)
 NIVEIS_FORMACAO_ORDENADO = [
     ("doutorado", "Doutorado"),
     ("phd", "Doutorado"),
@@ -98,7 +92,7 @@ NIVEIS_FORMACAO_ORDENADO = [
     ("licenciatura", "Graduação"),
     ("graduacao", "Graduação"),
     ("tecnologo", "Tecnólogo"),
-    ("tecnico em", "Técnico"),   # "técnico em X" antes de "técnico" isolado
+    ("tecnico em", "Técnico"),
     ("tecnico", "Técnico"),
     ("ensino medio", "Ensino Médio"),
     ("ensino fundamental", "Ensino Fundamental"),
@@ -106,7 +100,7 @@ NIVEIS_FORMACAO_ORDENADO = [
 
 AREAS_FORMACAO = [
     "administracao", "economia", "direito", "psicologia", "recursos humanos",
-    "engenharia civil", "engenharia",   # civil antes de genérico
+    "engenharia civil", "engenharia",
     "contabilidade", "ciencias contabeis", "marketing",
     "sistemas de informacao", "ciencia da computacao", "publicidade",
     "pedagogia", "logistica", "gestao comercial", "gestao financeira",
@@ -142,12 +136,10 @@ ROTULOS_SECAO_IGNORAR = [
 PREFIXOS_DADOS_PESSOAIS = [
     "estado civil", "nacionalidade", "data de nascimento", "nascimento",
     "cpf", "rg", "sexo", "genero",
-    # cobre linhas como "Brasileiro, Solteiro, 33 anos"
     "brasileiro", "brasileira", "solteiro", "solteira", "casado", "casada",
     "endereco", "endereço",
 ]
 
-# Títulos de cargo/objetivo que nunca são nomes de pessoa
 PREFIXOS_CARGO_OBJETIVO = [
     "engenheiro", "engenheira", "analista", "gerente", "coordenador",
     "assistente", "supervisor", "diretor", "tecnico", "auxiliar",
@@ -155,7 +147,6 @@ PREFIXOS_CARGO_OBJETIVO = [
     "atuar", "busco", "procuro",
 ]
 
-# Preposições que não iniciam com maiúscula em nomes compostos brasileiros
 PREPOSICOES_NOME = {"de", "da", "do", "dos", "das", "e", "van", "von", "del"}
 
 
@@ -170,21 +161,27 @@ def _parece_cargo_objetivo(linha: str) -> bool:
 
 
 def _parece_localizacao(linha: str) -> bool:
-    """Detecta linhas de endereço/bairro/cidade como 'Jardim Alvorada - Cambé/PR'.
+    """Detecta linhas de endereço como 'Jardim Alvorada - Cambé/PR'.
 
-    Correção: currículos com layout de duas colunas fazem o pdfplumber
-    extrair o bloco de contato (cidade, telefone) antes do nome. Sem esse
-    filtro, 'Jardim Alvorada - Cambé/PR' seria capturado como nome.
+    Usa a linha normalizada (sem acentos) E a original para cobrir qualquer
+    variação de encoding. Também checa as últimas duas letras após separador.
     """
-    linha_strip = linha.strip()
-    # Padrão "... - UF" ou ".../UF" no final da linha
-    m = re.search(r'[-/,]\s*([A-Z]{2})\s*$', linha_strip)
-    if m and m.group(1) in SIGLAS_ESTADO:
+    for texto in (linha.strip(), normalizar_texto(linha)):
+        # "... - UF" ou ".../UF" ou "..., UF"
+        m = re.search(r'[-/,]\s*([A-Za-z]{2})\s*$', texto)
+        if m and m.group(1).upper() in SIGLAS_ESTADO:
+            return True
+        # "... UF" com espaço
+        m2 = re.search(r'\s([A-Za-z]{2})\s*$', texto)
+        if m2 and m2.group(1).upper() in SIGLAS_ESTADO:
+            return True
+
+    # Estratégia extra: últimas 2 letras após qualquer separador
+    partes = re.split(r'[-/,\s]', linha.strip())
+    partes = [p.strip() for p in partes if p.strip()]
+    if partes and partes[-1].upper() in SIGLAS_ESTADO:
         return True
-    # Padrão "... UF" isolado no final (ex: "São Paulo SP")
-    m2 = re.search(r'\b([A-Z]{2})\s*$', linha_strip)
-    if m2 and m2.group(1) in SIGLAS_ESTADO:
-        return True
+
     return False
 
 
@@ -197,13 +194,11 @@ def _parece_rotulo_de_secao(linha: str) -> bool:
 
 
 def _limpar_linha(linha: str) -> str:
-    """Remove caracteres especiais não-ASCII como bullets do Word (ex: \\uf0b7)."""
+    """Remove caracteres especiais não-ASCII como bullets do Word (ex: \uf0b7)."""
     return re.sub(r'[^\x00-\x7F\u00C0-\u024F]', '', linha).strip()
 
 
 def _nome_do_arquivo(nome_arquivo: str) -> str | None:
-    """Último recurso: extrai nome do arquivo quando o texto não permite.
-    Ex: 'bruno-carvalhaes-rodrigues-947725746.pdf' -> 'Bruno Carvalhaes Rodrigues'"""
     base = re.split(
         r'[-_]\d',
         nome_arquivo.lower().replace('.pdf', '').replace('.docx', '')
@@ -216,6 +211,14 @@ def _nome_do_arquivo(nome_arquivo: str) -> str | None:
 
 def extrair_nome(texto: str, nome_arquivo: str = "") -> str:
     linhas_raw = [l.strip() for l in texto.splitlines() if l.strip()]
+
+    # --- CORREÇÃO PRINCIPAL ---
+    # Filtra localização ANTES de limpar a linha, usando o texto original.
+    # PDFs com duas colunas colocam o bloco de contato (cidade, telefone)
+    # antes do nome. Essa pré-filtragem garante que "Jardim Alvorada - Cambé/PR"
+    # seja descartado independente de encoding ou versão do pdfplumber.
+    linhas_raw = [l for l in linhas_raw if not _parece_localizacao(l)]
+
     linhas = [_limpar_linha(l) for l in linhas_raw]
     linhas = [l for l in linhas if l]
 
@@ -234,20 +237,18 @@ def extrair_nome(texto: str, nome_arquivo: str = "") -> str:
             i += 1; continue
         if _parece_cargo_objetivo(linha):
             i += 1; continue
-        # Correção: bloco de contato de PDFs com duas colunas aparece antes
-        # do nome. Descarta linhas que terminam com sigla de estado.
         if _parece_localizacao(linha):
             i += 1; continue
 
         palavras = linha.split()
 
-        # Caso Bruno: "B R U N O C A R V A L H A E S R O D R I G U E S"
+        # Caso Bruno: "B R U N O C A R V A L H A E S"
         if len(palavras) >= 4 and all(len(p) == 1 and p.isalpha() for p in palavras):
             nome_arq = _nome_do_arquivo(nome_arquivo)
             candidatos_validos.append(nome_arq if nome_arq else "".join(palavras).title())
             i += 1; continue
 
-        # Caso Giulia: nome partido em duas linhas de uma palavra
+        # Caso Giulia: nome partido em duas linhas
         if (len(palavras) == 1 and palavras[0][0].isupper() and palavras[0].isalpha()
                 and i + 1 < len(linhas)):
             proxima = linhas[i + 1]
@@ -259,7 +260,7 @@ def extrair_nome(texto: str, nome_arquivo: str = "") -> str:
                 candidatos_validos.append(f"{palavras[0]} {pp[0]}".title())
                 i += 2; continue
 
-        # Caso Yan: nome com preposições minúsculas
+        # Caso geral: nome com 2-6 palavras, iniciais maiúsculas
         if (1 < len(palavras) <= 6 and all(
                 p[0].isupper() for p in palavras
                 if p.isalpha() and p.lower() not in PREPOSICOES_NOME
@@ -301,22 +302,9 @@ def extrair_linkedin(texto: str):
 
 
 def extrair_cidade(texto: str):
-    """
-    Correção #5: a busca anterior usava `in` simples (substring), o que
-    causava falsos positivos — ex: "Natal" dava match em "profissional".
-    Agora usa \b (word boundary) via regex para garantir palavra inteira.
-
-    Correção adicional (Cícero): a ordem de busca foi invertida.
-    Antes, cidades conhecidas eram buscadas primeiro em todo o texto,
-    o que fazia "Londrina" (mencionada nas experiências) vencer sobre
-    "Cambé/PR" (cidade real do candidato, no cabeçalho).
-    Agora o padrão estrutural Cidade/UF tem prioridade — aparece quase
-    sempre no cabeçalho, portanto representa melhor a cidade do candidato.
-    """
     LETRAS = r"[A-Za-záéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]"
 
-    # 1) Padrão estrutural "Cidade/UF" ou "Cidade - UF" — alta precisão,
-    #    geralmente no cabeçalho do currículo (cidade de residência real).
+    # 1) Padrão estrutural Cidade/UF ou Cidade - UF (geralmente no cabeçalho)
     match = re.search(
         rf"({LETRAS}+(?:\s{LETRAS}+)*)\s*[-–/]\s*([A-Z]{{2}})\b",
         texto,
@@ -327,7 +315,7 @@ def extrair_cidade(texto: str):
         if uf in SIGLAS_ESTADO:
             return f"{cidade_raw} - {uf}"
 
-    # 2) Padrão "bairro, Cidade – UF" (ex: "Vargem Pequena, Rio de Janeiro – RJ")
+    # 2) Padrão "bairro, Cidade – UF"
     match2 = re.search(
         rf",\s*({LETRAS}+(?:\s{LETRAS}+)*?)\s*[-–]\s*([A-Z]{{2}})\b",
         texto,
@@ -338,9 +326,7 @@ def extrair_cidade(texto: str):
         if uf in SIGLAS_ESTADO:
             return f"{cidade_raw} - {uf}"
 
-    # 3) Fallback: lista de cidades conhecidas com word boundary.
-    #    Só usado quando nenhum padrão estrutural foi encontrado, para
-    #    evitar capturar cidades mencionadas no corpo das experiências.
+    # 3) Fallback: lista de cidades conhecidas com word boundary
     texto_norm = normalizar_texto(texto)
     for cidade_norm, cidade_original in CIDADES_COMUNS.items():
         padrao = r"\b" + re.escape(cidade_norm) + r"\b"
@@ -416,21 +402,14 @@ def isolar_secao_experiencia(texto: str) -> str:
 
 
 def calcular_experiencia_total(texto: str):
-    """
-    Correção #9: períodos com data de fim no futuro são descartados para
-    evitar contar "previsão de conclusão" como experiência já acumulada.
-    """
     secao_experiencia = isolar_secao_experiencia(texto)
     periodos_brutos = extrair_periodos(secao_experiencia)
 
     hoje = datetime.now()
     periodos_validos = [
-        (inicio, fim) for inicio, fim in periodos_brutos
-        if inicio <= hoje  # descarta períodos que começam no futuro
-    ]
-    # Limita a data de fim ao momento atual para não contar meses futuros
-    periodos_validos = [
-        (inicio, min(fim, hoje)) for inicio, fim in periodos_validos
+        (inicio, min(fim, hoje))
+        for inicio, fim in periodos_brutos
+        if inicio <= hoje
     ]
 
     total_meses = calcular_meses_experiencia(periodos_validos)
@@ -456,9 +435,6 @@ def processar_curriculo(nome_arquivo: str, arquivo_bytes: bytes, palavras_chave:
 
     dados = {
         "arquivo": nome_arquivo,
-        # Correção #12: texto_bruto NÃO incluído nos dados retornados.
-        # Era serializado no banco (até 100KB por currículo) sem necessidade.
-        # O score e demais extrações já foram calculados acima.
         "nome": extrair_nome(texto, nome_arquivo),
         "email": extrair_email(texto),
         "telefone": extrair_telefone(texto),
@@ -471,8 +447,6 @@ def processar_curriculo(nome_arquivo: str, arquivo_bytes: bytes, palavras_chave:
         "evidencias_competencias": evidencias,
         "experiencia_meses": total_meses,
         "experiencia_formatada": experiencia_formatada,
-        # texto_bruto mantido apenas em memória para o score_module usar
-        # nesta requisição; é passado separadamente e descartado depois.
         "_texto_bruto_temp": texto,
     }
     return dados
