@@ -169,6 +169,25 @@ def _parece_cargo_objetivo(linha: str) -> bool:
     return any(ln.startswith(p) for p in PREFIXOS_CARGO_OBJETIVO)
 
 
+def _parece_localizacao(linha: str) -> bool:
+    """Detecta linhas de endereço/bairro/cidade como 'Jardim Alvorada - Cambé/PR'.
+
+    Correção: currículos com layout de duas colunas fazem o pdfplumber
+    extrair o bloco de contato (cidade, telefone) antes do nome. Sem esse
+    filtro, 'Jardim Alvorada - Cambé/PR' seria capturado como nome.
+    """
+    linha_strip = linha.strip()
+    # Padrão "... - UF" ou ".../UF" no final da linha
+    m = re.search(r'[-/,]\s*([A-Z]{2})\s*$', linha_strip)
+    if m and m.group(1) in SIGLAS_ESTADO:
+        return True
+    # Padrão "... UF" isolado no final (ex: "São Paulo SP")
+    m2 = re.search(r'\b([A-Z]{2})\s*$', linha_strip)
+    if m2 and m2.group(1) in SIGLAS_ESTADO:
+        return True
+    return False
+
+
 def _parece_rotulo_de_secao(linha: str) -> bool:
     ln = normalizar_texto(linha).rstrip(":").strip()
     return any(
@@ -214,6 +233,10 @@ def extrair_nome(texto: str, nome_arquivo: str = "") -> str:
         if _parece_dado_pessoal(linha):
             i += 1; continue
         if _parece_cargo_objetivo(linha):
+            i += 1; continue
+        # Correção: bloco de contato de PDFs com duas colunas aparece antes
+        # do nome. Descarta linhas que terminam com sigla de estado.
+        if _parece_localizacao(linha):
             i += 1; continue
 
         palavras = linha.split()
@@ -282,19 +305,18 @@ def extrair_cidade(texto: str):
     Correção #5: a busca anterior usava `in` simples (substring), o que
     causava falsos positivos — ex: "Natal" dava match em "profissional".
     Agora usa \b (word boundary) via regex para garantir palavra inteira.
+
+    Correção adicional (Cícero): a ordem de busca foi invertida.
+    Antes, cidades conhecidas eram buscadas primeiro em todo o texto,
+    o que fazia "Londrina" (mencionada nas experiências) vencer sobre
+    "Cambé/PR" (cidade real do candidato, no cabeçalho).
+    Agora o padrão estrutural Cidade/UF tem prioridade — aparece quase
+    sempre no cabeçalho, portanto representa melhor a cidade do candidato.
     """
-    texto_norm = normalizar_texto(texto)
-
-    # 1) Lista de cidades conhecidas com word boundary
-    for cidade_norm, cidade_original in CIDADES_COMUNS.items():
-        # Escapa caracteres especiais antes de usar no regex
-        padrao = r"\b" + re.escape(cidade_norm) + r"\b"
-        if re.search(padrao, texto_norm):
-            return cidade_original
-
     LETRAS = r"[A-Za-záéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]"
 
-    # 2) Padrão "Cidade - UF" ou "Cidade/UF"
+    # 1) Padrão estrutural "Cidade/UF" ou "Cidade - UF" — alta precisão,
+    #    geralmente no cabeçalho do currículo (cidade de residência real).
     match = re.search(
         rf"({LETRAS}+(?:\s{LETRAS}+)*)\s*[-–/]\s*([A-Z]{{2}})\b",
         texto,
@@ -305,7 +327,7 @@ def extrair_cidade(texto: str):
         if uf in SIGLAS_ESTADO:
             return f"{cidade_raw} - {uf}"
 
-    # 3) Padrão "bairro, Cidade – UF"
+    # 2) Padrão "bairro, Cidade – UF" (ex: "Vargem Pequena, Rio de Janeiro – RJ")
     match2 = re.search(
         rf",\s*({LETRAS}+(?:\s{LETRAS}+)*?)\s*[-–]\s*([A-Z]{{2}})\b",
         texto,
@@ -315,6 +337,15 @@ def extrair_cidade(texto: str):
         uf = match2.group(2).strip()
         if uf in SIGLAS_ESTADO:
             return f"{cidade_raw} - {uf}"
+
+    # 3) Fallback: lista de cidades conhecidas com word boundary.
+    #    Só usado quando nenhum padrão estrutural foi encontrado, para
+    #    evitar capturar cidades mencionadas no corpo das experiências.
+    texto_norm = normalizar_texto(texto)
+    for cidade_norm, cidade_original in CIDADES_COMUNS.items():
+        padrao = r"\b" + re.escape(cidade_norm) + r"\b"
+        if re.search(padrao, texto_norm):
+            return cidade_original
 
     return None
 
