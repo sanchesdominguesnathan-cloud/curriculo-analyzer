@@ -69,7 +69,16 @@ CIDADES_COMUNS = [
     "Goiânia", "Manaus", "Belém", "Vitória", "Natal", "João Pessoa", "Maceió",
     "Santos", "Sorocaba", "Ribeirão Preto", "Osasco", "Guarulhos", "Uberlândia",
     "Contagem", "Joinville", "Londrina", "Niterói", "São José dos Campos",
+    "Itaboraí", "Maricá", "Duque de Caxias", "Nova Iguaçu", "São Gonçalo",
+    "Taquara", "Vargem Pequena",
 ]
+
+# Siglas válidas de estados brasileiros para validar o padrão Cidade - UF
+SIGLAS_ESTADO = {
+    "AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS",
+    "MG","PA","PB","PR","PE","PI","RJ","RN","RS","RO","RR","SC",
+    "SP","SE","TO",
+}
 
 # Ordenado do nível mais alto para o mais baixo para evitar falsos positivos
 # (ex: "técnico" aparecendo antes de "graduação" no texto)
@@ -268,19 +277,37 @@ def extrair_linkedin(texto: str):
 
 
 def extrair_cidade(texto: str):
+    # 1) Lista de cidades conhecidas (normalizada, case-insensitive)
     texto_norm = normalizar_texto(texto)
     for cidade in CIDADES_COMUNS:
         if normalizar_texto(cidade) in texto_norm:
             return cidade
-    # Fallback: padrão "Cidade - UF" ou "Cidade/UF"
+
+    # 2) Padrão "Cidade - UF" ou "Cidade/UF"
+    # Aceita maiúsculas (ITABORAI - RJ) e travessão (–) além do hífen
+    LETRAS = r"[A-Za-záéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]"
     match = re.search(
-        r"([A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ][a-záéíóúâêîôûãõç]+"
-        r"(?:\s[A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ][a-záéíóúâêîôûãõç]+)*)"
-        r"\s*[-/]\s*([A-Z]{2})\b",
+        rf"({LETRAS}+(?:\s{LETRAS}+)*)\s*[-–/]\s*([A-Z]{{2}})\b",
         texto,
     )
     if match:
-        return f"{match.group(1)} - {match.group(2)}"
+        cidade_raw = match.group(1).strip().title()
+        uf = match.group(2).strip()
+        if uf in SIGLAS_ESTADO:
+            return f"{cidade_raw} - {uf}"
+
+    # 3) Padrão "bairro, Cidade – UF" (Aylan: "Vargem Pequena, Rio de Janeiro – RJ")
+    # Pega o token imediatamente antes da sigla quando separado por vírgula
+    match2 = re.search(
+        rf",\s*({LETRAS}+(?:\s{LETRAS}+)*?)\s*[-–]\s*([A-Z]{{2}})\b",
+        texto,
+    )
+    if match2:
+        cidade_raw = match2.group(1).strip().title()
+        uf = match2.group(2).strip()
+        if uf in SIGLAS_ESTADO:
+            return f"{cidade_raw} - {uf}"
+
     return None
 
 
