@@ -4,7 +4,7 @@ Responsável por ler os arquivos de currículo (PDF e DOCX), extrair o texto
 bruto e, a partir dele, extrair os campos estruturados: nome, telefone,
 email, cidade, LinkedIn, experiência, formação, idiomas, competências, etc.
 """
-
+#
 import re
 import io
 import pdfplumber
