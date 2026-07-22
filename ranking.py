@@ -3,23 +3,12 @@ ranking.py
 Ordena e classifica os candidatos após o cálculo de score,
 e aplica filtros solicitados pela recrutadora.
 """
-
 import pandas as pd
 from utils import normalizar_texto
 
 
 def montar_tabela_resultados(lista_candidatos: list, cidade_vaga: str = "") -> pd.DataFrame:
-    """
-    lista_candidatos: lista de dicionários, cada um contendo os dados
-    extraídos (parser.py) + resultado do score (score.py).
-    cidade_vaga: cidade onde o trabalho será exercido (opcional). Quando
-    informada, candidatos de outra cidade (ou sem cidade identificada)
-    recebem um alerta numa coluna própria ("Alerta"), sem alterar o texto
-    da cidade em si — isso mantém a exportação (Excel/CSV/PDF) limpa.
-    Retorna um DataFrame pronto para exibição/ordenação/exportação.
-    """
     cidade_vaga_norm = normalizar_texto(cidade_vaga) if cidade_vaga else ""
-
     linhas = []
     for c in lista_candidatos:
         idiomas_txt = ", ".join(
@@ -30,7 +19,6 @@ def montar_tabela_resultados(lista_candidatos: list, cidade_vaga: str = "") -> p
         cidade_exibicao = cidade_candidato or "Não identificado"
         fora_da_cidade = False
         alerta_texto = ""
-
         if cidade_vaga_norm:
             cidade_candidato_norm = normalizar_texto(cidade_candidato)
             if not cidade_candidato_norm:
@@ -40,13 +28,26 @@ def montar_tabela_resultados(lista_candidatos: list, cidade_vaga: str = "") -> p
                 fora_da_cidade = True
                 alerta_texto = "⚠️ Fora da cidade da vaga"
 
+        # --- CORREÇÃO: evita "- -" quando nível ou área são None ---
+        nivel = c.get("formacao_nivel")
+        area = c.get("formacao_area")
+        if nivel and area:
+            formacao_str = f"{nivel} - {area}"
+        elif nivel:
+            formacao_str = nivel
+        elif area:
+            formacao_str = area
+        else:
+            formacao_str = "Não identificado"
+        # ------------------------------------------------------------
+
         linhas.append({
             "Nome": c.get("nome", "Não identificado"),
             "Pontuação": c.get("score_final", 0),
             "Compatibilidade (%)": c.get("compatibilidade_percentual", 0),
             "Experiência": c.get("experiencia_formatada", "Não identificado"),
             "Experiência (meses)": c.get("experiencia_meses", 0),
-            "Formação": f"{c.get('formacao_nivel') or '-'} - {c.get('formacao_area') or '-'}",
+            "Formação": formacao_str,
             "Idiomas": idiomas_txt,
             "Cidade": cidade_exibicao,
             "Alerta": alerta_texto,
@@ -77,26 +78,19 @@ def aplicar_filtros(
 ) -> pd.DataFrame:
     """Aplica filtros combináveis sobre a tabela de resultados."""
     resultado = df.copy()
-
     if cidade:
         resultado = resultado[resultado["Cidade"].str.contains(cidade, case=False, na=False)]
-
     if experiencia_min_meses is not None:
         resultado = resultado[resultado["Experiência (meses)"] >= experiencia_min_meses]
-
     if idioma:
         resultado = resultado[resultado["Idiomas"].str.contains(idioma, case=False, na=False)]
-
     if formacao:
         resultado = resultado[resultado["Formação"].str.contains(formacao, case=False, na=False)]
-
     if pontuacao_minima is not None:
         resultado = resultado[resultado["Pontuação"] >= pontuacao_minima]
-
     if cargo:
         resultado = resultado[
             resultado["Resumo"].str.contains(cargo, case=False, na=False)
             | resultado["Nome"].str.contains(cargo, case=False, na=False)
         ]
-
     return resultado.reset_index(drop=True)

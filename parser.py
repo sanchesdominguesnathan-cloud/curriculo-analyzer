@@ -4,7 +4,7 @@ Responsável por ler os arquivos de currículo (PDF e DOCX), extrair o texto
 bruto e, a partir dele, extrair os campos estruturados: nome, telefone,
 email, cidade, LinkedIn, experiência, formação, idiomas, competências, etc.
 """
-#
+
 import re
 import io
 import pdfplumber
@@ -34,13 +34,18 @@ def extrair_texto_pdf(arquivo_bytes: bytes) -> str:
 def extrair_texto_docx(arquivo_bytes: bytes) -> str:
     documento = docx.Document(io.BytesIO(arquivo_bytes))
 
-    partes = [p.text for p in documento.paragraphs]
+    # CORREÇÃO: parágrafos primeiro — o nome quase sempre está fora da tabela.
+    # Currículos com layout de duas colunas têm nome no parágrafo do topo;
+    # misturar tudo sem ordem quebrava a detecção de nome.
+    partes = [p.text for p in documento.paragraphs if p.text.strip()]
 
     for tabela in documento.tables:
         for linha in tabela.rows:
             for celula in linha.cells:
-                if celula.text.strip():
-                    partes.append(celula.text)
+                texto_celula = celula.text.strip()
+                if texto_celula:
+                    partes.append(texto_celula)
+
     return "\n".join(partes)
 
 
@@ -115,9 +120,7 @@ NIVEIS_IDIOMA = {
     "nativo": "Nativo",
 }
 
-
-# Títulos de seção comuns que NUNCA devem ser confundidos com o nome do
-# candidato, mesmo quando aparecem nas primeiras linhas do currículo.
+# Títulos de seção comuns que NUNCA devem ser confundidos com o nome do candidato.
 ROTULOS_SECAO_IGNORAR = [
     "objetivo", "dados pessoais", "informacoes pessoais", "perfil profissional",
     "perfil", "resumo profissional", "resumo", "sobre mim", "apresentacao",
@@ -127,18 +130,19 @@ ROTULOS_SECAO_IGNORAR = [
     "qualificacoes", "identificacao",
 ]
 
+# CORREÇÃO: campos de dados pessoais que nunca são o nome do candidato.
 PREFIXOS_DADOS_PESSOAIS = [
     "estado civil", "nacionalidade", "data de nascimento",
     "nascimento", "cpf", "rg", "sexo", "genero",
 ]
 
+
 def _parece_dado_pessoal(linha: str) -> bool:
     linha_norm = normalizar_texto(linha)
     return any(linha_norm.startswith(p) for p in PREFIXOS_DADOS_PESSOAIS)
 
+
 def _parece_rotulo_de_secao(linha: str) -> bool:
-    """Verifica se a linha é um título de seção (ex: 'Objetivo:', 'Dados Pessoais')
-    em vez de um nome de pessoa."""
     linha_norm = normalizar_texto(linha).rstrip(":").strip()
     for rotulo in ROTULOS_SECAO_IGNORAR:
         if linha_norm == rotulo or linha_norm.startswith(rotulo + ":") or linha_norm.startswith(rotulo + " "):
@@ -147,9 +151,6 @@ def _parece_rotulo_de_secao(linha: str) -> bool:
 
 
 def extrair_nome(texto: str) -> str:
-    """Assume que o nome do candidato está normalmente nas primeiras linhas
-    não vazias do currículo, sem caracteres típicos de email/telefone e sem
-    ser um título de seção conhecido (Objetivo, Dados Pessoais etc.)."""
     linhas = [l.strip() for l in texto.splitlines() if l.strip()]
     candidatos_validos = []
 
@@ -160,7 +161,7 @@ def extrair_nome(texto: str) -> str:
             continue
         if _parece_rotulo_de_secao(linha):
             continue
-        if _parece_dado_pessoal(linha):  # <- adiciona isso
+        if _parece_dado_pessoal(linha):
             continue
         palavras = linha.split()
         if 1 < len(palavras) <= 5 and all(p[0].isupper() for p in palavras if p.isalpha()):
@@ -169,9 +170,9 @@ def extrair_nome(texto: str) -> str:
     if candidatos_validos:
         return candidatos_validos[0].title()
 
-    # Fallback: primeira linha não vazia que também não seja um rótulo de seção
+    # CORREÇÃO: fallback também filtra dados pessoais (corrige "Estado Civil: Solteira" virando nome)
     for linha in linhas:
-        if not _parece_rotulo_de_secao(linha):
+        if not _parece_rotulo_de_secao(linha) and not _parece_dado_pessoal(linha):
             return linha.title()
 
     return "Não identificado"
@@ -197,6 +198,18 @@ def extrair_cidade(texto: str):
     for cidade in CIDADES_COMUNS:
         if normalizar_texto(cidade) in texto_norm:
             return cidade
+
+    # CORREÇÃO: fallback para padrão "Cidade - UF" ou "Cidade/UF"
+    # cobre cidades fora da lista e formatos comuns em currículos brasileiros
+    match = re.search(
+        r"([A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ][a-záéíóúâêîôûãõç]+"
+        r"(?:\s[A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ][a-záéíóúâêîôûãõç]+)*)"
+        r"\s*[-/]\s*([A-Z]{2})\b",
+        texto,
+    )
+    if match:
+        return f"{match.group(1)} - {match.group(2)}"
+
     return None
 
 
@@ -220,7 +233,7 @@ def extrair_formacao(texto: str):
 def extrair_idiomas(texto: str):
     texto_norm = normalizar_texto(texto)
     idiomas_encontrados = {}
-    janela_maxima = 25  # caracteres após o nome do idioma para procurar o nível
+    janela_maxima = 25
 
     for chave_idioma, nome_idioma in IDIOMAS_CONHECIDOS.items():
         if chave_idioma not in texto_norm:
@@ -229,7 +242,6 @@ def extrair_idiomas(texto: str):
         idx = texto_norm.find(chave_idioma)
         trecho = texto_norm[idx + len(chave_idioma): idx + len(chave_idioma) + janela_maxima]
 
-        # escolhe o nível cuja posição no trecho é a mais próxima do nome do idioma
         melhor_nivel, melhor_posicao = None, None
         for chave_nivel, nome_nivel in NIVEIS_IDIOMA.items():
             posicao = trecho.find(chave_nivel)
@@ -242,8 +254,6 @@ def extrair_idiomas(texto: str):
 
 
 def extrair_competencias(texto: str, palavras_chave: list):
-    """Retorna a lista de palavras-chave (da lista configurada pela
-    recrutadora) encontradas no texto do currículo, com evidência."""
     encontradas = []
     evidencias = {}
     for palavra in palavras_chave:
@@ -254,14 +264,12 @@ def extrair_competencias(texto: str, palavras_chave: list):
     return encontradas, evidencias
 
 
-# Cabeçalhos que indicam o início da seção de experiência profissional
 PADRAO_INICIO_EXPERIENCIA = re.compile(
     r"(experi[êe]ncias?\s+profission(al|ais)|hist[óo]rico\s+profissional|"
     r"atua[çc][ãa]o\s+profissional|vida\s+profissional|experi[êe]ncias?\s+de\s+trabalho)",
     re.IGNORECASE
 )
 
-# Cabeçalhos que indicam o fim da seção de experiência (início de outra seção)
 PADRAO_FIM_EXPERIENCIA = re.compile(
     r"(forma[çc][ãa]o(\s+acad[êe]mica)?|educa[çc][ãa]o|idiomas|cursos(\s+e\s+certifica[çc][õo]es)?|"
     r"certifica[çc][õo]es|habilidades|compet[êe]ncias|informa[çc][õo]es\s+adicionais|"
@@ -273,14 +281,6 @@ PADRAO_FIM_EXPERIENCIA = re.compile(
 
 
 def isolar_secao_experiencia(texto: str) -> str:
-    """
-    Tenta isolar apenas o trecho do currículo referente à experiência
-    profissional, para evitar que datas de formação, cursos ou entidades
-    estudantis sejam somadas ao cálculo de tempo de experiência.
-
-    Se não conseguir identificar os cabeçalhos, retorna o texto completo
-    (comportamento anterior, usado como fallback de segurança).
-    """
     match_inicio = PADRAO_INICIO_EXPERIENCIA.search(texto)
     if not match_inicio:
         return texto
@@ -301,11 +301,6 @@ def calcular_experiencia_total(texto: str):
 
 
 def processar_curriculo(nome_arquivo: str, arquivo_bytes: bytes, palavras_chave: list = None) -> dict:
-    """
-    Função principal do módulo: recebe o arquivo bruto e devolve um
-    dicionário com todos os campos extraídos, pronto para ser usado no
-    módulo de score/ranking.
-    """
     if palavras_chave is None:
         palavras_chave = listar_todas_palavras_chave_sugeridas()
 
