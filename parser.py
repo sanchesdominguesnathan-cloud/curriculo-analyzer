@@ -33,24 +33,17 @@ def extrair_texto_pdf(arquivo_bytes: bytes) -> str:
 
 def extrair_texto_docx(arquivo_bytes: bytes) -> str:
     documento = docx.Document(io.BytesIO(arquivo_bytes))
-
-    # CORREÇÃO: parágrafos primeiro — o nome quase sempre está fora da tabela.
-    # Currículos com layout de duas colunas têm nome no parágrafo do topo;
-    # misturar tudo sem ordem quebrava a detecção de nome.
+    # Parágrafos primeiro — o nome quase sempre está fora da tabela
     partes = [p.text for p in documento.paragraphs if p.text.strip()]
-
     for tabela in documento.tables:
         for linha in tabela.rows:
             for celula in linha.cells:
-                texto_celula = celula.text.strip()
-                if texto_celula:
-                    partes.append(texto_celula)
-
+                if celula.text.strip():
+                    partes.append(celula.text.strip())
     return "\n".join(partes)
 
 
 def extrair_texto(nome_arquivo: str, arquivo_bytes: bytes) -> str:
-    """Detecta o tipo do arquivo pela extensão e extrai o texto."""
     nome_lower = nome_arquivo.lower()
     if nome_lower.endswith(".pdf"):
         return extrair_texto_pdf(arquivo_bytes)
@@ -78,26 +71,30 @@ CIDADES_COMUNS = [
     "Contagem", "Joinville", "Londrina", "Niterói", "São José dos Campos",
 ]
 
-NIVEIS_FORMACAO = {
-    "ensino medio": "Ensino Médio",
-    "ensino fundamental": "Ensino Fundamental",
-    "tecnologo": "Tecnólogo",
-    "tecnico": "Técnico",
-    "graduacao": "Graduação",
-    "bacharelado": "Graduação",
-    "licenciatura": "Graduação",
-    "mba": "MBA",
-    "pos graduacao": "Pós-graduação",
-    "pos-graduacao": "Pós-graduação",
-    "especializacao": "Pós-graduação",
-    "mestrado": "Mestrado",
-    "doutorado": "Doutorado",
-    "phd": "Doutorado",
-}
+# Ordenado do nível mais alto para o mais baixo para evitar falsos positivos
+# (ex: "técnico" aparecendo antes de "graduação" no texto)
+NIVEIS_FORMACAO_ORDENADO = [
+    ("doutorado", "Doutorado"),
+    ("phd", "Doutorado"),
+    ("mestrado", "Mestrado"),
+    ("mba", "MBA"),
+    ("pos graduacao", "Pós-graduação"),
+    ("pos-graduacao", "Pós-graduação"),
+    ("especializacao", "Pós-graduação"),
+    ("bacharelado", "Graduação"),
+    ("licenciatura", "Graduação"),
+    ("graduacao", "Graduação"),
+    ("tecnologo", "Tecnólogo"),
+    ("tecnico em", "Técnico"),   # "técnico em X" antes de "técnico" isolado
+    ("tecnico", "Técnico"),
+    ("ensino medio", "Ensino Médio"),
+    ("ensino fundamental", "Ensino Fundamental"),
+]
 
 AREAS_FORMACAO = [
     "administracao", "economia", "direito", "psicologia", "recursos humanos",
-    "engenharia", "contabilidade", "ciencias contabeis", "marketing",
+    "engenharia civil", "engenharia",   # civil antes de genérico
+    "contabilidade", "ciencias contabeis", "marketing",
     "sistemas de informacao", "ciencia da computacao", "publicidade",
     "pedagogia", "logistica", "gestao comercial", "gestao financeira",
     "relacoes internacionais", "comunicacao social", "medicina", "enfermagem",
@@ -120,7 +117,6 @@ NIVEIS_IDIOMA = {
     "nativo": "Nativo",
 }
 
-# Títulos de seção comuns que NUNCA devem ser confundidos com o nome do candidato.
 ROTULOS_SECAO_IGNORAR = [
     "objetivo", "dados pessoais", "informacoes pessoais", "perfil profissional",
     "perfil", "resumo profissional", "resumo", "sobre mim", "apresentacao",
@@ -130,49 +126,127 @@ ROTULOS_SECAO_IGNORAR = [
     "qualificacoes", "identificacao",
 ]
 
-# CORREÇÃO: campos de dados pessoais que nunca são o nome do candidato.
 PREFIXOS_DADOS_PESSOAIS = [
-    "estado civil", "nacionalidade", "data de nascimento",
-    "nascimento", "cpf", "rg", "sexo", "genero",
+    "estado civil", "nacionalidade", "data de nascimento", "nascimento",
+    "cpf", "rg", "sexo", "genero",
+    # cobre linhas como "Brasileiro, Solteiro, 33 anos"
+    "brasileiro", "brasileira", "solteiro", "solteira", "casado", "casada",
+    "endereco", "endereço",
 ]
+
+# Títulos de cargo/objetivo que nunca são nomes de pessoa
+PREFIXOS_CARGO_OBJETIVO = [
+    "engenheiro", "engenheira", "analista", "gerente", "coordenador",
+    "assistente", "supervisor", "diretor", "tecnico", "auxiliar",
+    "estagiario", "consultor", "programador", "desenvolvedor",
+    "atuar", "busco", "procuro",
+]
+
+# Preposições que não iniciam com maiúscula em nomes compostos brasileiros
+PREPOSICOES_NOME = {"de", "da", "do", "dos", "das", "e", "van", "von", "del"}
 
 
 def _parece_dado_pessoal(linha: str) -> bool:
-    linha_norm = normalizar_texto(linha)
-    return any(linha_norm.startswith(p) for p in PREFIXOS_DADOS_PESSOAIS)
+    ln = normalizar_texto(linha)
+    return any(ln.startswith(p) for p in PREFIXOS_DADOS_PESSOAIS)
+
+
+def _parece_cargo_objetivo(linha: str) -> bool:
+    ln = normalizar_texto(linha)
+    return any(ln.startswith(p) for p in PREFIXOS_CARGO_OBJETIVO)
 
 
 def _parece_rotulo_de_secao(linha: str) -> bool:
-    linha_norm = normalizar_texto(linha).rstrip(":").strip()
-    for rotulo in ROTULOS_SECAO_IGNORAR:
-        if linha_norm == rotulo or linha_norm.startswith(rotulo + ":") or linha_norm.startswith(rotulo + " "):
-            return True
-    return False
+    ln = normalizar_texto(linha).rstrip(":").strip()
+    return any(
+        ln == r or ln.startswith(r + ":") or ln.startswith(r + " ")
+        for r in ROTULOS_SECAO_IGNORAR
+    )
 
 
-def extrair_nome(texto: str) -> str:
-    linhas = [l.strip() for l in texto.splitlines() if l.strip()]
+def _limpar_linha(linha: str) -> str:
+    """Remove caracteres especiais não-ASCII como bullets do Word (ex: \\uf0b7)."""
+    return re.sub(r'[^\x00-\x7F\u00C0-\u024F]', '', linha).strip()
+
+
+def _nome_do_arquivo(nome_arquivo: str) -> str | None:
+    """Último recurso: extrai nome do arquivo quando o texto não permite.
+    Ex: 'bruno-carvalhaes-rodrigues-947725746.pdf' -> 'Bruno Carvalhaes Rodrigues'"""
+    base = re.split(
+        r'[-_]\d',
+        nome_arquivo.lower().replace('.pdf', '').replace('.docx', '')
+    )[0]
+    partes = [p for p in base.split('-') if p.isalpha() and len(p) > 1]
+    if len(partes) >= 2:
+        return " ".join(p.title() for p in partes)
+    return None
+
+
+def extrair_nome(texto: str, nome_arquivo: str = "") -> str:
+    linhas_raw = [l.strip() for l in texto.splitlines() if l.strip()]
+    linhas = [_limpar_linha(l) for l in linhas_raw]
+    linhas = [l for l in linhas if l]
+
     candidatos_validos = []
+    i = 0
+    while i < min(12, len(linhas)):
+        linha = linhas[i]
 
-    for linha in linhas[:8]:
         if REGEX_EMAIL.search(linha):
-            continue
-        if any(char.isdigit() for char in linha):
-            continue
+            i += 1; continue
+        if any(c.isdigit() for c in linha):
+            i += 1; continue
         if _parece_rotulo_de_secao(linha):
-            continue
+            i += 1; continue
         if _parece_dado_pessoal(linha):
-            continue
+            i += 1; continue
+        if _parece_cargo_objetivo(linha):
+            i += 1; continue
+
         palavras = linha.split()
-        if 1 < len(palavras) <= 5 and all(p[0].isupper() for p in palavras if p.isalpha()):
-            candidatos_validos.append(linha)
+
+        # Caso Bruno: "B R U N O C A R V A L H A E S R O D R I G U E S"
+        # Nome com todas letras individuais separadas por espaço
+        if len(palavras) >= 4 and all(len(p) == 1 and p.isalpha() for p in palavras):
+            nome_arq = _nome_do_arquivo(nome_arquivo)
+            candidatos_validos.append(nome_arq if nome_arq else "".join(palavras).title())
+            i += 1; continue
+
+        # Caso Giulia: nome partido em duas linhas de uma palavra ("Giulia" / "Muntowski")
+        if (len(palavras) == 1 and palavras[0][0].isupper() and palavras[0].isalpha()
+                and i + 1 < len(linhas)):
+            proxima = linhas[i + 1]
+            pp = proxima.split()
+            if (len(pp) == 1 and pp[0][0].isupper() and pp[0].isalpha()
+                    and not _parece_rotulo_de_secao(proxima)
+                    and not _parece_dado_pessoal(proxima)
+                    and not _parece_cargo_objetivo(proxima)):
+                candidatos_validos.append(f"{palavras[0]} {pp[0]}".title())
+                i += 2; continue
+
+        # Caso Yan: nome com preposições minúsculas ("Yan de Mello Pereira Bastos")
+        if (1 < len(palavras) <= 6 and all(
+                p[0].isupper() for p in palavras
+                if p.isalpha() and p.lower() not in PREPOSICOES_NOME
+        )):
+            candidatos_validos.append(linha.title())
+            i += 1; continue
+
+        i += 1
 
     if candidatos_validos:
-        return candidatos_validos[0].title()
+        return candidatos_validos[0]
 
-    # CORREÇÃO: fallback também filtra dados pessoais (corrige "Estado Civil: Solteira" virando nome)
+    # Fallback 1: nome do arquivo
+    nome_arq = _nome_do_arquivo(nome_arquivo)
+    if nome_arq:
+        return nome_arq
+
+    # Fallback 2: primeira linha que não seja rótulo ou dado pessoal
     for linha in linhas:
-        if not _parece_rotulo_de_secao(linha) and not _parece_dado_pessoal(linha):
+        if (not _parece_rotulo_de_secao(linha)
+                and not _parece_dado_pessoal(linha)
+                and not _parece_cargo_objetivo(linha)):
             return linha.title()
 
     return "Não identificado"
@@ -198,9 +272,7 @@ def extrair_cidade(texto: str):
     for cidade in CIDADES_COMUNS:
         if normalizar_texto(cidade) in texto_norm:
             return cidade
-
-    # CORREÇÃO: fallback para padrão "Cidade - UF" ou "Cidade/UF"
-    # cobre cidades fora da lista e formatos comuns em currículos brasileiros
+    # Fallback: padrão "Cidade - UF" ou "Cidade/UF"
     match = re.search(
         r"([A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ][a-záéíóúâêîôûãõç]+"
         r"(?:\s[A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ][a-záéíóúâêîôûãõç]+)*)"
@@ -209,25 +281,14 @@ def extrair_cidade(texto: str):
     )
     if match:
         return f"{match.group(1)} - {match.group(2)}"
-
     return None
 
 
 def extrair_formacao(texto: str):
     texto_norm = normalizar_texto(texto)
-    nivel_encontrado = None
-    for chave, nivel in NIVEIS_FORMACAO.items():
-        if chave in texto_norm:
-            nivel_encontrado = nivel
-            break
-
-    area_encontrada = None
-    for area in AREAS_FORMACAO:
-        if area in texto_norm:
-            area_encontrada = area.title()
-            break
-
-    return nivel_encontrado, area_encontrada
+    nivel = next((v for k, v in NIVEIS_FORMACAO_ORDENADO if k in texto_norm), None)
+    area = next((a.title() for a in AREAS_FORMACAO if a in texto_norm), None)
+    return nivel, area
 
 
 def extrair_idiomas(texto: str):
@@ -238,17 +299,14 @@ def extrair_idiomas(texto: str):
     for chave_idioma, nome_idioma in IDIOMAS_CONHECIDOS.items():
         if chave_idioma not in texto_norm:
             continue
-
         idx = texto_norm.find(chave_idioma)
         trecho = texto_norm[idx + len(chave_idioma): idx + len(chave_idioma) + janela_maxima]
-
         melhor_nivel, melhor_posicao = None, None
         for chave_nivel, nome_nivel in NIVEIS_IDIOMA.items():
             posicao = trecho.find(chave_nivel)
             if posicao != -1 and (melhor_posicao is None or posicao < melhor_posicao):
                 melhor_posicao = posicao
                 melhor_nivel = nome_nivel
-
         idiomas_encontrados[nome_idioma] = melhor_nivel or "Não especificado"
     return idiomas_encontrados
 
@@ -284,11 +342,9 @@ def isolar_secao_experiencia(texto: str) -> str:
     match_inicio = PADRAO_INICIO_EXPERIENCIA.search(texto)
     if not match_inicio:
         return texto
-
     inicio_secao = match_inicio.end()
     match_fim = PADRAO_FIM_EXPERIENCIA.search(texto, pos=inicio_secao)
     fim_secao = match_fim.start() if match_fim else len(texto)
-
     trecho = texto[inicio_secao:fim_secao].strip()
     return trecho if trecho else texto
 
@@ -320,7 +376,7 @@ def processar_curriculo(nome_arquivo: str, arquivo_bytes: bytes, palavras_chave:
     dados = {
         "arquivo": nome_arquivo,
         "texto_bruto": texto,
-        "nome": extrair_nome(texto),
+        "nome": extrair_nome(texto, nome_arquivo),   # passa nome_arquivo para fallback
         "email": extrair_email(texto),
         "telefone": extrair_telefone(texto),
         "linkedin": extrair_linkedin(texto),
