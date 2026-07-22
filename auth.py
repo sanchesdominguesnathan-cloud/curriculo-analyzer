@@ -4,7 +4,6 @@ Autenticação de empresas (multi-tenant). Usa PBKDF2-HMAC-SHA256 para
 armazenar senhas com segurança, sem depender de bibliotecas externas de
 compilação nativa (evita problemas de instalação em serviços de nuvem).
 """
-
 import hashlib
 import secrets
 
@@ -30,11 +29,18 @@ def verificar_senha(senha_digitada: str, hash_salvo: str, salt_salvo: str) -> bo
 
 
 def senha_e_forte(senha: str) -> tuple:
-    """Validação simples de força de senha. Retorna (ok: bool, motivo: str)."""
+    """Validação de força de senha. Retorna (ok: bool, motivo: str).
+
+    Correção #3: adicionada exigência de caractere especial.
+    Antes aceitava 'Senha123' como senha forte.
+    """
     if len(senha) < 8:
         return False, "A senha precisa ter pelo menos 8 caracteres."
     if senha.lower() == senha or senha.upper() == senha:
         return False, "Use letras maiúsculas e minúsculas na senha."
     if not any(c.isdigit() for c in senha):
         return False, "Inclua ao menos um número na senha."
+    caracteres_especiais = set("!@#$%^&*()_+-=[]{}|;':\",./<>?")
+    if not any(c in caracteres_especiais for c in senha):
+        return False, "Inclua ao menos um caractere especial (!@#$%^&* etc.)."
     return True, ""

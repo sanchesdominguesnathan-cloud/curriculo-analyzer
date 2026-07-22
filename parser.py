@@ -7,6 +7,7 @@ email, cidade, LinkedIn, experiência, formação, idiomas, competências, etc.
 
 import re
 import io
+from datetime import datetime
 import pdfplumber
 import docx
 
@@ -63,7 +64,9 @@ REGEX_TELEFONE = re.compile(
 )
 REGEX_LINKEDIN = re.compile(r"(?:linkedin\.com/in/[a-zA-Z0-9\-_/]+)", re.IGNORECASE)
 
-CIDADES_COMUNS = [
+# Correção #20: transformado em dict {texto_normalizado: nome_original}
+# para busca O(1) ao invés de O(n) na lista.
+_CIDADES_COMUNS_LISTA = [
     "São Paulo", "Rio de Janeiro", "Belo Horizonte", "Curitiba", "Porto Alegre",
     "Salvador", "Fortaleza", "Recife", "Brasília", "Campinas", "Florianópolis",
     "Goiânia", "Manaus", "Belém", "Vitória", "Natal", "João Pessoa", "Maceió",
@@ -72,6 +75,7 @@ CIDADES_COMUNS = [
     "Itaboraí", "Maricá", "Duque de Caxias", "Nova Iguaçu", "São Gonçalo",
     "Taquara", "Vargem Pequena",
 ]
+CIDADES_COMUNS = {normalizar_texto(c): c for c in _CIDADES_COMUNS_LISTA}
 
 # Siglas válidas de estados brasileiros para validar o padrão Cidade - UF
 SIGLAS_ESTADO = {
@@ -215,13 +219,12 @@ def extrair_nome(texto: str, nome_arquivo: str = "") -> str:
         palavras = linha.split()
 
         # Caso Bruno: "B R U N O C A R V A L H A E S R O D R I G U E S"
-        # Nome com todas letras individuais separadas por espaço
         if len(palavras) >= 4 and all(len(p) == 1 and p.isalpha() for p in palavras):
             nome_arq = _nome_do_arquivo(nome_arquivo)
             candidatos_validos.append(nome_arq if nome_arq else "".join(palavras).title())
             i += 1; continue
 
-        # Caso Giulia: nome partido em duas linhas de uma palavra ("Giulia" / "Muntowski")
+        # Caso Giulia: nome partido em duas linhas de uma palavra
         if (len(palavras) == 1 and palavras[0][0].isupper() and palavras[0].isalpha()
                 and i + 1 < len(linhas)):
             proxima = linhas[i + 1]
@@ -233,7 +236,7 @@ def extrair_nome(texto: str, nome_arquivo: str = "") -> str:
                 candidatos_validos.append(f"{palavras[0]} {pp[0]}".title())
                 i += 2; continue
 
-        # Caso Yan: nome com preposições minúsculas ("Yan de Mello Pereira Bastos")
+        # Caso Yan: nome com preposições minúsculas
         if (1 < len(palavras) <= 6 and all(
                 p[0].isupper() for p in palavras
                 if p.isalpha() and p.lower() not in PREPOSICOES_NOME
@@ -246,12 +249,10 @@ def extrair_nome(texto: str, nome_arquivo: str = "") -> str:
     if candidatos_validos:
         return candidatos_validos[0]
 
-    # Fallback 1: nome do arquivo
     nome_arq = _nome_do_arquivo(nome_arquivo)
     if nome_arq:
         return nome_arq
 
-    # Fallback 2: primeira linha que não seja rótulo ou dado pessoal
     for linha in linhas:
         if (not _parece_rotulo_de_secao(linha)
                 and not _parece_dado_pessoal(linha)
@@ -277,15 +278,23 @@ def extrair_linkedin(texto: str):
 
 
 def extrair_cidade(texto: str):
-    # 1) Lista de cidades conhecidas (normalizada, case-insensitive)
+    """
+    Correção #5: a busca anterior usava `in` simples (substring), o que
+    causava falsos positivos — ex: "Natal" dava match em "profissional".
+    Agora usa \b (word boundary) via regex para garantir palavra inteira.
+    """
     texto_norm = normalizar_texto(texto)
-    for cidade in CIDADES_COMUNS:
-        if normalizar_texto(cidade) in texto_norm:
-            return cidade
+
+    # 1) Lista de cidades conhecidas com word boundary
+    for cidade_norm, cidade_original in CIDADES_COMUNS.items():
+        # Escapa caracteres especiais antes de usar no regex
+        padrao = r"\b" + re.escape(cidade_norm) + r"\b"
+        if re.search(padrao, texto_norm):
+            return cidade_original
+
+    LETRAS = r"[A-Za-záéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]"
 
     # 2) Padrão "Cidade - UF" ou "Cidade/UF"
-    # Aceita maiúsculas (ITABORAI - RJ) e travessão (–) além do hífen
-    LETRAS = r"[A-Za-záéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]"
     match = re.search(
         rf"({LETRAS}+(?:\s{LETRAS}+)*)\s*[-–/]\s*([A-Z]{{2}})\b",
         texto,
@@ -296,8 +305,7 @@ def extrair_cidade(texto: str):
         if uf in SIGLAS_ESTADO:
             return f"{cidade_raw} - {uf}"
 
-    # 3) Padrão "bairro, Cidade – UF" (Aylan: "Vargem Pequena, Rio de Janeiro – RJ")
-    # Pega o token imediatamente antes da sigla quando separado por vírgula
+    # 3) Padrão "bairro, Cidade – UF"
     match2 = re.search(
         rf",\s*({LETRAS}+(?:\s{LETRAS}+)*?)\s*[-–]\s*([A-Z]{{2}})\b",
         texto,
@@ -377,9 +385,24 @@ def isolar_secao_experiencia(texto: str) -> str:
 
 
 def calcular_experiencia_total(texto: str):
+    """
+    Correção #9: períodos com data de fim no futuro são descartados para
+    evitar contar "previsão de conclusão" como experiência já acumulada.
+    """
     secao_experiencia = isolar_secao_experiencia(texto)
-    periodos = extrair_periodos(secao_experiencia)
-    total_meses = calcular_meses_experiencia(periodos)
+    periodos_brutos = extrair_periodos(secao_experiencia)
+
+    hoje = datetime.now()
+    periodos_validos = [
+        (inicio, fim) for inicio, fim in periodos_brutos
+        if inicio <= hoje  # descarta períodos que começam no futuro
+    ]
+    # Limita a data de fim ao momento atual para não contar meses futuros
+    periodos_validos = [
+        (inicio, min(fim, hoje)) for inicio, fim in periodos_validos
+    ]
+
+    total_meses = calcular_meses_experiencia(periodos_validos)
     return total_meses, formatar_experiencia(total_meses)
 
 
@@ -402,8 +425,10 @@ def processar_curriculo(nome_arquivo: str, arquivo_bytes: bytes, palavras_chave:
 
     dados = {
         "arquivo": nome_arquivo,
-        "texto_bruto": texto,
-        "nome": extrair_nome(texto, nome_arquivo),   # passa nome_arquivo para fallback
+        # Correção #12: texto_bruto NÃO incluído nos dados retornados.
+        # Era serializado no banco (até 100KB por currículo) sem necessidade.
+        # O score e demais extrações já foram calculados acima.
+        "nome": extrair_nome(texto, nome_arquivo),
         "email": extrair_email(texto),
         "telefone": extrair_telefone(texto),
         "linkedin": extrair_linkedin(texto),
@@ -415,5 +440,8 @@ def processar_curriculo(nome_arquivo: str, arquivo_bytes: bytes, palavras_chave:
         "evidencias_competencias": evidencias,
         "experiencia_meses": total_meses,
         "experiencia_formatada": experiencia_formatada,
+        # texto_bruto mantido apenas em memória para o score_module usar
+        # nesta requisição; é passado separadamente e descartado depois.
+        "_texto_bruto_temp": texto,
     }
     return dados

@@ -28,7 +28,6 @@ def montar_tabela_resultados(lista_candidatos: list, cidade_vaga: str = "") -> p
                 fora_da_cidade = True
                 alerta_texto = "⚠️ Fora da cidade da vaga"
 
-        # --- CORREÇÃO: evita "- -" quando nível ou área são None ---
         nivel = c.get("formacao_nivel")
         area = c.get("formacao_area")
         if nivel and area:
@@ -39,7 +38,11 @@ def montar_tabela_resultados(lista_candidatos: list, cidade_vaga: str = "") -> p
             formacao_str = area
         else:
             formacao_str = "Não identificado"
-        # ------------------------------------------------------------
+
+        # Correção #8: competências como texto para o filtro de cargo
+        # poder encontrar candidatos mesmo quando o resumo não menciona
+        # a competência textualmente.
+        competencias_txt = ", ".join(c.get("competencias_encontradas", []))
 
         linhas.append({
             "Nome": c.get("nome", "Não identificado"),
@@ -57,6 +60,7 @@ def montar_tabela_resultados(lista_candidatos: list, cidade_vaga: str = "") -> p
             "Telefone": c.get("telefone") or "-",
             "LinkedIn": c.get("linkedin") or "-",
             "Resumo": c.get("resumo", ""),
+            "Competências": competencias_txt,
             "Arquivo": c.get("arquivo", ""),
         })
 
@@ -76,8 +80,18 @@ def aplicar_filtros(
     pontuacao_minima: float = None,
     cargo: str = None,
 ) -> pd.DataFrame:
-    """Aplica filtros combináveis sobre a tabela de resultados."""
+    """Aplica filtros combináveis sobre a tabela de resultados.
+
+    Correção #8: filtro de cargo agora busca também na coluna Competências,
+    para encontrar candidatos cujo resumo não mencione a competência
+    textualmente mas que ela foi identificada no currículo.
+
+    Correção #15: ranking reordenado após aplicar os filtros, para que
+    a numeração seja contínua (1, 2, 3...) e não reflita posições do
+    ranking original (ex: 3, 7, 12).
+    """
     resultado = df.copy()
+
     if cidade:
         resultado = resultado[resultado["Cidade"].str.contains(cidade, case=False, na=False)]
     if experiencia_min_meses is not None:
@@ -89,8 +103,17 @@ def aplicar_filtros(
     if pontuacao_minima is not None:
         resultado = resultado[resultado["Pontuação"] >= pontuacao_minima]
     if cargo:
-        resultado = resultado[
+        # Correção #8: busca em Resumo, Nome e Competências
+        mask = (
             resultado["Resumo"].str.contains(cargo, case=False, na=False)
             | resultado["Nome"].str.contains(cargo, case=False, na=False)
-        ]
-    return resultado.reset_index(drop=True)
+            | resultado["Competências"].str.contains(cargo, case=False, na=False)
+        )
+        resultado = resultado[mask]
+
+    # Correção #15: reordenar ranking após filtros
+    resultado = resultado.reset_index(drop=True)
+    if not resultado.empty and "Ranking" in resultado.columns:
+        resultado["Ranking"] = range(1, len(resultado) + 1)
+
+    return resultado

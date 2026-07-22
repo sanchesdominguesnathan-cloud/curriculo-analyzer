@@ -117,6 +117,21 @@ def inicializar_banco():
                 data_decisao TIMESTAMP NOT NULL DEFAULT NOW()
             )
         """)
+
+        # Correção #18: índices para as queries de busca mais frequentes.
+        # Sem eles, cada consulta faz seq scan na tabela inteira.
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_curriculos_empresa_hash
+                ON curriculos(empresa_id, hash_arquivo)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_curriculos_vaga
+                ON curriculos(empresa_id, vaga_id)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_decisoes_curriculo
+                ON decisoes(curriculo_id)
+        """)
         cur.close()
 
 
@@ -187,8 +202,17 @@ def curriculo_ja_analisado(empresa_id: int, hash_arquivo: str):
         linha = cur.fetchone()
         cur.close()
         if linha:
-            dados = json.loads(linha["dados_json"])
+            # Correção #2: tratamento explícito de JSON corrompido no banco,
+            # em vez de deixar explodir com stack trace para o usuário.
+            try:
+                dados = json.loads(linha["dados_json"])
+            except (json.JSONDecodeError, TypeError):
+                return None
             dados["_id_banco"] = linha["id"]
+            # Correção #4: não reanexar conteudo_bytes à sessão ao recuperar
+            # do banco — esses bytes já foram processados e não precisam
+            # ficar acumulados na memória da sessão.
+            dados.pop("conteudo_bytes", None)
             return dados
         return None
 
@@ -198,7 +222,18 @@ def salvar_curriculo(empresa_id: int, hash_arquivo: str, nome_arquivo: str, dado
     """Salva (ou atualiza) o resultado da análise de um currículo, isolado
     por empresa. O mesmo arquivo físico pode existir em empresas diferentes
     sem conflito (cada uma tem seu próprio 'hash_arquivo' com escopo de
-    empresa_id)."""
+    empresa_id).
+
+    Correção #12: texto_bruto e conteudo_bytes são excluídos antes de
+    serializar — podem ultrapassar 100 KB por currículo e não precisam
+    ser persistidos (texto_bruto é reprocessado se necessário;
+    conteudo_bytes é servido via download direto do arquivo original).
+    """
+    dados_para_salvar = {
+        k: v for k, v in dados.items()
+        if k not in ("texto_bruto", "conteudo_bytes")
+    }
+
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute("""
@@ -217,7 +252,7 @@ def salvar_curriculo(empresa_id: int, hash_arquivo: str, nome_arquivo: str, dado
         """, (
             empresa_id, hash_arquivo, nome_arquivo,
             dados.get("nome"), dados.get("email"), dados.get("telefone"), dados.get("cidade"),
-            json.dumps(dados, ensure_ascii=False, default=str),
+            json.dumps(dados_para_salvar, ensure_ascii=False, default=str),
             dados.get("score_final"), dados.get("status"), datetime.now(),
             vaga_descricao, vaga_id,
         ))
@@ -238,7 +273,12 @@ def registrar_decisao(curriculo_id: int, decisao: str):
 
 def calcular_ajuste_aprendizado(empresa_id: int, competencias_candidato: list) -> float:
     """Sistema de aprendizado simples, calculado apenas com o histórico de
-    decisões DA MESMA EMPRESA (não mistura aprendizado entre clientes)."""
+    decisões DA MESMA EMPRESA (não mistura aprendizado entre clientes).
+
+    Correção #7: adicionado LIMIT 500 para evitar full scan em empresas
+    com histórico muito grande. O ajuste continua representativo com uma
+    janela recente de decisões.
+    """
     if not competencias_candidato:
         return 0.0
 
@@ -249,6 +289,8 @@ def calcular_ajuste_aprendizado(empresa_id: int, competencias_candidato: list) -
             FROM decisoes d
             JOIN curriculos c ON c.id = d.curriculo_id
             WHERE c.empresa_id = %s
+            ORDER BY d.data_decisao DESC
+            LIMIT 500
         """, (empresa_id,))
         linhas = cur.fetchall()
         cur.close()
@@ -290,9 +332,15 @@ def listar_curriculos_por_vaga(empresa_id: int, vaga_id: int):
         )
         resultados = []
         for linha in cur.fetchall():
-            dados = json.loads(linha["dados_json"])
+            # Correção #2: tratamento explícito de JSON corrompido.
+            try:
+                dados = json.loads(linha["dados_json"])
+            except (json.JSONDecodeError, TypeError):
+                continue
             dados["_id_banco"] = linha["id"]
             dados["hash_arquivo"] = linha["hash_arquivo"]
+            # conteudo_bytes não é persistido (correção #12), então não
+            # tenta recuperá-lo aqui.
             resultados.append(dados)
         cur.close()
         return resultados
@@ -366,7 +414,17 @@ def excluir_vaga(empresa_id: int, vaga_id: int):
 
 
 def limpar_banco():
-    """Apaga TODOS os dados de TODAS as empresas. Uso apenas em testes."""
+    """Apaga TODOS os dados de TODAS as empresas.
+
+    Correção #1: protegido contra execução acidental em produção.
+    Só roda se AMBIENTE=teste estiver definido no ambiente.
+    """
+    ambiente = os.environ.get("AMBIENTE", "").lower()
+    if ambiente != "teste":
+        raise RuntimeError(
+            "limpar_banco() só pode ser chamada com AMBIENTE=teste. "
+            "Em produção, use o painel do banco de dados diretamente."
+        )
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute("DELETE FROM decisoes")

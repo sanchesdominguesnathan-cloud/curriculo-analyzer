@@ -6,10 +6,19 @@ Execução local:
     streamlit run app.py
 """
 
+import io
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import io
+
+# Correção #14: import de reportlab no topo do arquivo, junto com as
+# demais dependências. O import tardio dentro de gerar_pdf_resultados
+# estava escondendo a dependência sem nenhum benefício real.
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import landscape, A4
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
+from reportlab.lib.units import cm
 
 import database as db
 import auth
@@ -20,6 +29,7 @@ from keywords import listar_todas_palavras_chave_sugeridas, BASE_SINONIMOS, PESO
 from utils import gerar_hash_arquivo, gerar_resumo_candidato
 
 st.set_page_config(page_title="Análise Automática de Currículos", layout="wide")
+
 try:
     db.inicializar_banco()
 except Exception as e:
@@ -31,22 +41,29 @@ except Exception as e:
     st.caption(f"Detalhe técnico: {e}")
     st.stop()
 
-if "resultados" not in st.session_state:
-    st.session_state.resultados = []
-if "df_resultados" not in st.session_state:
-    st.session_state.df_resultados = pd.DataFrame()
-if "vaga_id_ativa" not in st.session_state:
-    st.session_state.vaga_id_ativa = None
-if "ultima_vaga_carregada" not in st.session_state:
-    st.session_state.ultima_vaga_carregada = None
-if "empresa_logada" not in st.session_state:
-    st.session_state.empresa_logada = None
+
+# ---------------------------------------------------------------------------
+# Correção #10: inicialização do session_state em função dedicada,
+# chamada no início de main(). Antes ficava no nível de módulo, misturado
+# com código de setup global.
+# ---------------------------------------------------------------------------
+def _init_session():
+    defaults = {
+        "resultados": [],
+        "df_resultados": pd.DataFrame(),
+        "vaga_id_ativa": None,
+        "ultima_vaga_carregada": None,
+        "empresa_logada": None,
+        # Correção #11: contador de tentativas de login para bloquear brute force.
+        "tentativas_login": 0,
+    }
+    for chave, valor in defaults.items():
+        if chave not in st.session_state:
+            st.session_state[chave] = valor
 
 
 def _obter_codigo_cadastro():
-    """Código de acesso exigido para criar uma nova conta de empresa —
-    evita que qualquer pessoa que ache o link crie uma conta sozinha.
-    Configurado em .streamlit/secrets.toml como CODIGO_CADASTRO."""
+    """Código de acesso exigido para criar uma nova conta de empresa."""
     try:
         return st.secrets.get("CODIGO_CADASTRO", None)
     except Exception:
@@ -54,32 +71,50 @@ def _obter_codigo_cadastro():
 
 
 def tela_login():
-    """Tela de login/cadastro exibida antes de qualquer acesso ao sistema.
-    Retorna True se a empresa está autenticada nesta sessão."""
+    """Tela de login/cadastro exibida antes de qualquer acesso ao sistema."""
     st.title(" Análise Automática de Currículos")
     st.caption("Acesso restrito. Faça login para continuar.")
 
     aba_login, aba_cadastro = st.tabs([" Entrar", "🆕 Criar conta"])
 
     with aba_login:
+        # Correção #11: bloqueia após 5 tentativas consecutivas falhas.
+        MAX_TENTATIVAS = 5
+        if st.session_state.tentativas_login >= MAX_TENTATIVAS:
+            st.error(
+                f"⛔ Muitas tentativas de login ({MAX_TENTATIVAS}). "
+                "Recarregue a página para tentar novamente."
+            )
+            if st.button("🔄 Recarregar"):
+                st.session_state.tentativas_login = 0
+                st.rerun()
+            return False
+
         with st.form("form_login"):
             email = st.text_input("E-mail")
             senha = st.text_input("Senha", type="password")
             enviar = st.form_submit_button("Entrar", type="primary")
+
         if enviar:
             empresa = db.autenticar_empresa(email, senha)
             if empresa:
                 st.session_state.empresa_logada = empresa
+                st.session_state.tentativas_login = 0
                 st.rerun()
             else:
-                st.error("E-mail ou senha incorretos, ou conta desativada.")
+                st.session_state.tentativas_login += 1
+                restantes = MAX_TENTATIVAS - st.session_state.tentativas_login
+                if restantes > 0:
+                    st.error(f"E-mail ou senha incorretos. {restantes} tentativa(s) restante(s).")
+                else:
+                    st.error("Conta bloqueada temporariamente. Recarregue a página.")
 
     with aba_cadastro:
         codigo_esperado = _obter_codigo_cadastro()
         with st.form("form_cadastro"):
             nome_empresa = st.text_input("Nome da empresa")
             email_cadastro = st.text_input("E-mail (será seu login)")
-            senha_cadastro = st.text_input("Senha (mín. 8 caracteres, com maiúscula e número)", type="password")
+            senha_cadastro = st.text_input("Senha (mín. 8 caracteres, com maiúscula, número e caractere especial)", type="password")
             senha_confirmacao = st.text_input("Confirme a senha", type="password")
             codigo_digitado = None
             if codigo_esperado:
@@ -108,13 +143,6 @@ def tela_login():
 
 
 def secao_vaga(empresa_id: int):
-    """
-    Permite salvar/carregar 'pastas de vaga': cada vaga guarda descrição,
-    palavras-chave (com pesos) e cidade. Ao reabrir uma vaga já salva, os
-    currículos analisados anteriormente para ela são recuperados
-    automaticamente — útil quando os currículos chegam em dias diferentes.
-    Tudo isolado pela empresa logada (empresa_id).
-    """
     st.header(" Pasta da Vaga")
 
     vagas_salvas = db.listar_vagas(empresa_id)
@@ -159,11 +187,6 @@ def secao_vaga(empresa_id: int):
                 st.success(f"Vaga '{escolha}' excluída. Os currículos continuam salvos no histórico geral.")
                 st.rerun()
 
-    # Sempre que a vaga selecionada MUDA (seja para outra vaga já salva, seja
-    # para "Nova vaga"), a tela de resultados é recarregada do zero: com os
-    # candidatos daquela vaga (se houver), ou vazia (se for uma vaga nova ou
-    # ainda sem candidatos). Isso evita que candidatos de uma vaga apareçam
-    # misturados na análise de outra.
     if st.session_state.ultima_vaga_carregada != chave_vaga_atual:
         if vaga_ativa["id"] is not None:
             candidatos_salvos = db.listar_curriculos_por_vaga(empresa_id, vaga_ativa["id"])
@@ -335,6 +358,10 @@ def processar_analise(empresa_id, arquivos, descricao_vaga, cidade_vaga, pesos_o
         ja_analisado = db.curriculo_ja_analisado(empresa_id, hash_arquivo)
         if ja_analisado:
             st.info(f"⏭️ '{arquivo.name}' já havia sido analisado anteriormente. Reaproveitando resultado salvo.")
+            # Correção #4: conteudo_bytes não é reanexado ao resultado
+            # recuperado do banco — serve apenas para o download imediato,
+            # então é mantido só neste escopo local e descartado depois.
+            ja_analisado["_bytes_download"] = conteudo_bytes
             novos_resultados.append(ja_analisado)
             continue
 
@@ -351,17 +378,23 @@ def processar_analise(empresa_id, arquivos, descricao_vaga, cidade_vaga, pesos_o
         dados.update(resultado_score)
         dados["resumo"] = gerar_resumo_candidato(dados)
         dados["hash_arquivo"] = hash_arquivo
-        dados["conteudo_bytes"] = conteudo_bytes
+
+        # Correção #4: bytes do arquivo ficam apenas no campo _bytes_download,
+        # separado dos dados do candidato. Não são serializados no banco
+        # (database.py já exclui conteudo_bytes), e não precisam ficar
+        # acumulados em session_state entre re-renders.
+        dados["_bytes_download"] = conteudo_bytes
 
         id_banco = db.salvar_curriculo(empresa_id, hash_arquivo, arquivo.name, dados, descricao_vaga, vaga_id=vaga_id)
         dados["_id_banco"] = id_banco
+
+        # Remove o campo temporário de texto bruto após o score ser calculado
+        dados.pop("_texto_bruto_temp", None)
 
         novos_resultados.append(dados)
 
     barra.progress(1.0, text="Análise concluída!")
 
-    # Mescla com resultados já carregados na sessão (ex: candidatos de dias
-    # anteriores desta mesma vaga), evitando duplicar pelo hash do arquivo.
     resultados_por_hash = {r.get("hash_arquivo"): r for r in st.session_state.resultados if r.get("hash_arquivo")}
     for r in novos_resultados:
         resultados_por_hash[r.get("hash_arquivo")] = r
@@ -386,7 +419,7 @@ def secao_filtros(df: pd.DataFrame):
     with col5:
         pontuacao_min = st.number_input("Pontuação mínima", min_value=0, max_value=100, value=0, step=5)
     with col6:
-        cargo = st.text_input("Cargo/palavra no resumo")
+        cargo = st.text_input("Cargo/competência")
 
     somente_mesma_cidade = False
     if "Fora da cidade da vaga" in df.columns and df["Fora da cidade da vaga"].any():
@@ -411,9 +444,6 @@ def secao_filtros(df: pd.DataFrame):
 
 
 def cor_status(status):
-    # OBS: o componente de tabela do Streamlit aplica cor de FUNDO do Styler,
-    # mas ignora a cor da LETRA. Por isso usamos fundos escuros e saturados,
-    # que mantêm boa legibilidade com o texto claro padrão do tema.
     return {
         "Aprovado": "background-color: #1e5631; color: #ffffff",
         "Talvez": "background-color: #7a5c00; color: #ffffff",
@@ -469,13 +499,20 @@ def secao_resultados(df_filtrado: pd.DataFrame):
                 candidato_original = next(
                     (r for r in st.session_state.resultados if r.get("arquivo") == linha["Arquivo"]), None
                 )
-                if candidato_original and candidato_original.get("conteudo_bytes"):
+                # Correção #4: bytes para download ficam em _bytes_download,
+                # não em conteudo_bytes. Candidatos recuperados do banco
+                # (sem _bytes_download) não exibem o botão de download.
+                bytes_download = candidato_original.get("_bytes_download") if candidato_original else None
+                if bytes_download:
                     st.download_button(
                         "📎 Abrir currículo",
-                        data=candidato_original["conteudo_bytes"],
+                        data=bytes_download,
                         file_name=linha["Arquivo"],
                         key=f"download_{linha['Arquivo']}_{linha['Ranking']}",
                     )
+                else:
+                    st.caption("📎 Arquivo disponível apenas na sessão em que foi enviado.")
+
                 col_ap, col_rep = st.columns(2)
                 id_banco = candidato_original.get("_id_banco") if candidato_original else None
                 if id_banco:
@@ -524,11 +561,7 @@ def secao_exportacao(df: pd.DataFrame):
 
 
 def gerar_pdf_resultados(df: pd.DataFrame) -> bytes:
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import landscape, A4
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
-    from reportlab.lib.units import cm
-
+    # Correção #14: imports movidos para o topo do arquivo.
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4))
     colunas = ["Ranking", "Nome", "Pontuação", "Status", "Cidade", "Alerta", "Experiência"]
@@ -536,7 +569,6 @@ def gerar_pdf_resultados(df: pd.DataFrame) -> bytes:
 
     df_pdf = df[colunas_presentes].copy()
     if "Alerta" in df_pdf.columns:
-        # Remove o emoji (fontes padrão do PDF podem não renderizá-lo corretamente)
         df_pdf["Alerta"] = df_pdf["Alerta"].str.replace("⚠️ ", "", regex=False)
 
     dados_tabela = [colunas_presentes] + df_pdf.astype(str).values.tolist()
@@ -594,6 +626,9 @@ def secao_dashboard(df: pd.DataFrame):
 
 
 def main():
+    # Correção #10: session_state inicializado em função dedicada.
+    _init_session()
+
     if not st.session_state.empresa_logada:
         tela_login()
         return
@@ -610,6 +645,7 @@ def main():
             st.session_state.df_resultados = pd.DataFrame()
             st.session_state.vaga_id_ativa = None
             st.session_state.ultima_vaga_carregada = None
+            st.session_state.tentativas_login = 0
             st.rerun()
 
     secao_cabecalho()
@@ -619,9 +655,6 @@ def main():
     st.header("3. Análise")
     if st.button(" Analisar", type="primary"):
         vaga_id_para_salvar = st.session_state.vaga_id_ativa
-        # Se a vaga ainda não foi salva explicitamente mas tem um nome
-        # preenchido, salva automaticamente antes de analisar, para já
-        # vincular os currículos a ela.
         if vaga_id_para_salvar is None and (vaga_ativa.get("nome") or "").strip():
             vaga_id_para_salvar = db.salvar_vaga(
                 empresa_id, vaga_ativa["nome"].strip(), descricao_vaga, pesos_obrigatorias, pesos_desejaveis, cidade_vaga

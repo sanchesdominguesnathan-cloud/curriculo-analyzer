@@ -39,6 +39,8 @@ NIVEIS_IDIOMA_PONTOS = {
     "Avançado": 85,
     "Fluente": 100,
     "Nativo": 100,
+    # Correção #6: "Não especificado" explicitamente documentado.
+    # Idiomas sem nível identificado recebem 40 pts (entre básico e intermediário).
     "Não especificado": 40,
 }
 
@@ -81,9 +83,17 @@ def pontuar_formacao(nivel_formacao: str) -> float:
 
 
 def pontuar_idiomas(idiomas: dict) -> float:
+    """
+    Correção #6: proteção explícita contra dict vazio e nível None.
+    - dict vazio -> 0.0 (sem idiomas identificados)
+    - nível None -> trata como "Não especificado" (40 pts)
+    """
     if not idiomas:
         return 0.0
-    pontos = [NIVEIS_IDIOMA_PONTOS.get(nivel, 40) for nivel in idiomas.values()]
+    pontos = [
+        NIVEIS_IDIOMA_PONTOS.get(nivel or "Não especificado", 40)
+        for nivel in idiomas.values()
+    ]
     return round(sum(pontos) / len(pontos), 2)
 
 
@@ -97,8 +107,11 @@ def calcular_score_final(
     Calcula o score final ponderado e retorna o detalhamento completo.
     ajuste_aprendizado: pequeno fator (-10 a +10) aplicado com base no
     histórico de decisões da recrutadora para currículos parecidos.
+
+    Correção #12: usa _texto_bruto_temp (presente apenas durante o
+    processamento, não persistido no banco) em vez de texto_bruto.
     """
-    texto = dados_curriculo.get("texto_bruto", "")
+    texto = dados_curriculo.get("_texto_bruto_temp", "")
 
     score_obrig, encontradas_obrig, faltantes_obrig = pontuar_palavras(texto, palavras_obrigatorias)
     score_desej, encontradas_desej, faltantes_desej = pontuar_palavras(texto, palavras_desejaveis)
