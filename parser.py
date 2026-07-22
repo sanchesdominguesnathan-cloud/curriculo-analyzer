@@ -33,11 +33,14 @@ def extrair_texto_pdf(arquivo_bytes: bytes) -> str:
 
 def extrair_texto_docx(arquivo_bytes: bytes) -> str:
     documento = docx.Document(io.BytesIO(arquivo_bytes))
+
     partes = [p.text for p in documento.paragraphs]
+
     for tabela in documento.tables:
         for linha in tabela.rows:
             for celula in linha.cells:
-                partes.append(celula.text)
+                if celula.text.strip():
+                    partes.append(celula.text)
     return "\n".join(partes)
 
 
@@ -124,6 +127,14 @@ ROTULOS_SECAO_IGNORAR = [
     "qualificacoes", "identificacao",
 ]
 
+PREFIXOS_DADOS_PESSOAIS = [
+    "estado civil", "nacionalidade", "data de nascimento",
+    "nascimento", "cpf", "rg", "sexo", "genero",
+]
+
+def _parece_dado_pessoal(linha: str) -> bool:
+    linha_norm = normalizar_texto(linha)
+    return any(linha_norm.startswith(p) for p in PREFIXOS_DADOS_PESSOAIS)
 
 def _parece_rotulo_de_secao(linha: str) -> bool:
     """Verifica se a linha é um título de seção (ex: 'Objetivo:', 'Dados Pessoais')
@@ -148,6 +159,8 @@ def extrair_nome(texto: str) -> str:
         if any(char.isdigit() for char in linha):
             continue
         if _parece_rotulo_de_secao(linha):
+            continue
+        if _parece_dado_pessoal(linha):  # <- adiciona isso
             continue
         palavras = linha.split()
         if 1 < len(palavras) <= 5 and all(p[0].isupper() for p in palavras if p.isalpha()):
