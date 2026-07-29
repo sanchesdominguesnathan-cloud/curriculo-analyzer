@@ -97,7 +97,25 @@ def _ler_linhas_planilha(sheet_id: str) -> list:
     cliente = _obter_cliente_gspread()
     planilha = cliente.open_by_key(sheet_id)
     aba = planilha.sheet1
-    return aba.get_all_records()
+    # numericise_ignore=['all'] faz o gspread trazer TODAS as células como
+    # string, sem tentar adivinhar se o conteúdo "parece" um número. Isso
+    # evita que colunas como Telefone/CEP virem int/float automaticamente
+    # e resolve na raiz o erro "'int' object has no attribute 'strip'".
+    return aba.get_all_records(numericise_ignore=["all"])
+
+
+def _texto(valor) -> str:
+    """Converte qualquer valor vindo da planilha (str, int, float, bool,
+    None) em texto limpo, com espaços nas pontas removidos.
+
+    Necessário como segunda camada de proteção: mesmo usando
+    numericise_ignore no gspread, é mais seguro que qualquer ponto do
+    código que leia uma célula da planilha nunca quebre se um dia vier um
+    tipo inesperado (int, float, None etc.) — por exemplo, se uma nova
+    pergunta numérica for adicionada ao Forms no futuro."""
+    if valor is None:
+        return ""
+    return str(valor).strip()
 
 
 def _normalizar_linha(linha: dict) -> dict:
@@ -139,7 +157,7 @@ def _montar_dados_candidato(linha_normalizada: dict, vaga: dict):
     """Monta o dicionário 'dados' no mesmo formato que
     parser.processar_curriculo retorna, mas a partir do texto colado no
     Forms em vez de um arquivo PDF/DOCX."""
-    texto = (_valor(linha_normalizada, COLUNA_TEXTO) or "").strip()
+    texto = _texto(_valor(linha_normalizada, COLUNA_TEXTO))
 
     palavras_obrigatorias = vaga.get("obrigatorias", {}) if vaga else {}
     palavras_desejaveis = vaga.get("desejaveis", {}) if vaga else {}
@@ -152,7 +170,7 @@ def _montar_dados_candidato(linha_normalizada: dict, vaga: dict):
     competencias, evidencias = extrair_competencias(texto, todas_palavras)
     total_meses, experiencia_formatada = calcular_experiencia_total(texto)
 
-    nome_candidato = (_valor(linha_normalizada, COLUNA_NOME) or "").strip() or "Não identificado"
+    nome_candidato = _texto(_valor(linha_normalizada, COLUNA_NOME)) or "Não identificado"
     nome_arquivo = f"[Forms] {nome_candidato}"
 
     dados = {
@@ -160,9 +178,9 @@ def _montar_dados_candidato(linha_normalizada: dict, vaga: dict):
         # Campos vindos direto do formulário (mais confiáveis que regex,
         # já que o próprio recrutador digitou) — cai pro texto só se vier vazio.
         "nome": nome_candidato,
-        "email": (_valor(linha_normalizada, COLUNA_EMAIL) or "").strip() or extrair_email(texto),
-        "telefone": (_valor(linha_normalizada, COLUNA_TELEFONE) or "").strip() or extrair_telefone(texto),
-        "cidade": (_valor(linha_normalizada, COLUNA_CIDADE) or "").strip() or extrair_cidade(texto),
+        "email": _texto(_valor(linha_normalizada, COLUNA_EMAIL)) or extrair_email(texto),
+        "telefone": _texto(_valor(linha_normalizada, COLUNA_TELEFONE)) or extrair_telefone(texto),
+        "cidade": _texto(_valor(linha_normalizada, COLUNA_CIDADE)) or extrair_cidade(texto),
         "linkedin": extrair_linkedin(texto),
         "formacao_nivel": nivel_formacao,
         "formacao_area": area_formacao,
@@ -190,12 +208,12 @@ def importar_candidaturas_forms(empresa_id: int, sheet_id: str) -> dict:
     for linha_bruta in linhas:
         linha = _normalizar_linha(linha_bruta)
 
-        texto = (_valor(linha, COLUNA_TEXTO) or "").strip()
+        texto = _texto(_valor(linha, COLUNA_TEXTO))
         if len(texto) < 20:
             ignorados_sem_texto += 1
             continue
 
-        nome_vaga_digitado = (_valor(linha, COLUNA_VAGA) or "").strip()
+        nome_vaga_digitado = _texto(_valor(linha, COLUNA_VAGA))
         vaga_id, vaga = _casar_vaga(empresa_id, nome_vaga_digitado)
         if vaga_id is None:
             vagas_nao_encontradas.append({
@@ -209,7 +227,7 @@ def importar_candidaturas_forms(empresa_id: int, sheet_id: str) -> dict:
         # Hash de deduplicação: como não existe arquivo físico pra gerar
         # hash de bytes (como no upload normal), usamos o timestamp da
         # submissão + email como identificador único e estável da linha.
-        chave_dedup = f"{_valor(linha, COLUNA_TIMESTAMP) or ''}|{dados.get('email', '')}"
+        chave_dedup = f"{_texto(_valor(linha, COLUNA_TIMESTAMP))}|{dados.get('email', '')}"
         hash_arquivo = gerar_hash_arquivo(chave_dedup.encode("utf-8"))
 
         ja_existe = db.curriculo_ja_analisado(empresa_id, hash_arquivo)
