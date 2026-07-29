@@ -5,8 +5,8 @@ cada empresa (cliente que comprou a ferramenta) só enxerga suas próprias
 vagas e candidatos, mesmo compartilhando o mesmo banco de dados.
 
 Configuração da conexão (nessa ordem de prioridade):
-1. st.secrets["DATABASE_URL"]  (usado no Streamlit Cloud, via secrets.toml)
-2. variável de ambiente DATABASE_URL (usado em testes locais)
+1. variável de ambiente DATABASE_URL (usado no Render, e também em testes locais)
+2. st.secrets["DATABASE_URL"]  (usado no Streamlit Cloud, via secrets.toml)
 
 Responsabilidades:
 - Autenticar empresas (via auth.py) e gerenciar contas de clientes.
@@ -29,8 +29,23 @@ import auth
 
 
 def _obter_url_conexao() -> str:
-    """Busca a connection string do Postgres nos secrets do Streamlit
-    (produção) ou na variável de ambiente (testes locais)."""
+    """Busca a connection string do Postgres.
+
+    Prioridade:
+    1. Variável de ambiente DATABASE_URL — é assim que o Render (e testes
+       locais) fornecem o segredo. O Render NÃO usa secrets.toml, então
+       essa checagem precisa vir primeiro.
+    2. st.secrets["DATABASE_URL"] — usado quando o app roda no Streamlit
+       Cloud, que injeta os segredos via arquivo secrets.toml.
+
+    Correção: antes só olhava st.secrets primeiro, o que quebrava no
+    Render com o erro "No secrets found" mesmo com DATABASE_URL já
+    configurada certinho nas Environment Variables do Render.
+    """
+    url_ambiente = os.environ.get("DATABASE_URL")
+    if url_ambiente:
+        return url_ambiente
+
     try:
         import streamlit as st
         if "DATABASE_URL" in st.secrets:
@@ -38,13 +53,11 @@ def _obter_url_conexao() -> str:
     except Exception:
         pass
 
-    url_ambiente = os.environ.get("DATABASE_URL")
-    if url_ambiente:
-        return url_ambiente
-
     raise RuntimeError(
-        "Nenhuma DATABASE_URL configurada. Defina em .streamlit/secrets.toml "
-        "(produção) ou na variável de ambiente DATABASE_URL (testes locais)."
+        "Nenhuma DATABASE_URL configurada. No Render, defina em "
+        "Environment Variables. No Streamlit Cloud, defina em "
+        ".streamlit/secrets.toml. Em testes locais, defina a variável "
+        "de ambiente DATABASE_URL."
     )
 
 
