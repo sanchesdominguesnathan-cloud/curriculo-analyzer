@@ -7,7 +7,7 @@ Execução local:
 """
 
 import io
-import forms_import
+import os
 
 import streamlit as st
 import pandas as pd
@@ -26,6 +26,7 @@ import auth
 import parser as curriculo_parser
 import score as score_module
 import ranking
+import forms_import
 from keywords import listar_todas_palavras_chave_sugeridas, BASE_SINONIMOS, PESOS_PADRAO
 from utils import gerar_hash_arquivo, gerar_resumo_candidato
 
