@@ -43,7 +43,7 @@ from parser import (
     extrair_telefone,
     extrair_cidade,
 )
-from utils import gerar_hash_arquivo, gerar_resumo_candidato
+from utils import gerar_hash_arquivo, gerar_resumo_candidato, normalizar_texto
 from keywords import listar_todas_palavras_chave_sugeridas
 
 
@@ -57,9 +57,7 @@ from keywords import listar_todas_palavras_chave_sugeridas
 #
 # Como pegar o sheet_id: é o trecho da URL entre "/d/" e "/edit".
 SHEET_IDS_POR_EMPRESA = {
-    1: "1M6VHZHefthzgQ81X6lqafEVx3NPuvuSf-npTy8MYcBU",  # Teste
-    3: "SHEET_ID_DA_SEB_EDUCATION_AQUI",                # SEB education
-    4: "SHEET_ID_DO_INSTITUTO_INTEGRATO_AQUI",          # Instituto Integrato
+    # 1: "1M6VHZHefthzgQ81X6lqafEVx3NPuvuSf-npTy8MYcBU",  # <- exemplo, ajuste o empresa_id certo
 }
 
 
@@ -102,25 +100,46 @@ def _ler_linhas_planilha(sheet_id: str) -> list:
     return aba.get_all_records()
 
 
+def _normalizar_linha(linha: dict) -> dict:
+    """Normaliza as chaves (nomes das colunas) do dicionário — remove
+    acentos, deixa minúsculo e limpa espaços extras — antes de qualquer
+    leitura.
+
+    Corrige um bug real: a mesma palavra acentuada (ex: 'currículo') pode
+    ser salva com uma codificação Unicode ligeiramente diferente dependendo
+    de onde foi digitada/copiada, e aí uma comparação exata de string falha
+    silenciosamente mesmo com os textos parecendo idênticos na tela. Usando
+    normalizar_texto (já existente em utils.py) dos dois lados da
+    comparação, isso deixa de importar."""
+    return {normalizar_texto(k): v for k, v in linha.items()}
+
+
+def _valor(linha_normalizada: dict, nome_coluna: str):
+    """Busca o valor de uma coluna na linha já normalizada, normalizando
+    também o nome da coluna que estamos procurando."""
+    return linha_normalizada.get(normalizar_texto(nome_coluna))
+
+
 def _casar_vaga(empresa_id: int, nome_vaga_digitado: str):
     """Encontra a vaga cadastrada da empresa cujo nome é idêntico ao
     selecionado no dropdown do Forms. Retorna (vaga_id, vaga_dict) ou
     (None, None) se não encontrar."""
     if not nome_vaga_digitado:
         return None, None
+    alvo_normalizado = normalizar_texto(nome_vaga_digitado)
     vagas = db.listar_vagas(empresa_id)
     for v in vagas:
-        if v["nome"].strip() == nome_vaga_digitado.strip():
+        if normalizar_texto(v["nome"]) == alvo_normalizado:
             vaga_completa = db.obter_vaga(empresa_id, v["id"])
             return v["id"], vaga_completa
     return None, None
 
 
-def _montar_dados_candidato(linha: dict, vaga: dict):
+def _montar_dados_candidato(linha_normalizada: dict, vaga: dict):
     """Monta o dicionário 'dados' no mesmo formato que
     parser.processar_curriculo retorna, mas a partir do texto colado no
     Forms em vez de um arquivo PDF/DOCX."""
-    texto = (linha.get(COLUNA_TEXTO) or "").strip()
+    texto = (_valor(linha_normalizada, COLUNA_TEXTO) or "").strip()
 
     palavras_obrigatorias = vaga.get("obrigatorias", {}) if vaga else {}
     palavras_desejaveis = vaga.get("desejaveis", {}) if vaga else {}
@@ -133,7 +152,7 @@ def _montar_dados_candidato(linha: dict, vaga: dict):
     competencias, evidencias = extrair_competencias(texto, todas_palavras)
     total_meses, experiencia_formatada = calcular_experiencia_total(texto)
 
-    nome_candidato = (linha.get(COLUNA_NOME) or "").strip() or "Não identificado"
+    nome_candidato = (_valor(linha_normalizada, COLUNA_NOME) or "").strip() or "Não identificado"
     nome_arquivo = f"[Forms] {nome_candidato}"
 
     dados = {
@@ -141,9 +160,9 @@ def _montar_dados_candidato(linha: dict, vaga: dict):
         # Campos vindos direto do formulário (mais confiáveis que regex,
         # já que o próprio recrutador digitou) — cai pro texto só se vier vazio.
         "nome": nome_candidato,
-        "email": (linha.get(COLUNA_EMAIL) or "").strip() or extrair_email(texto),
-        "telefone": (linha.get(COLUNA_TELEFONE) or "").strip() or extrair_telefone(texto),
-        "cidade": (linha.get(COLUNA_CIDADE) or "").strip() or extrair_cidade(texto),
+        "email": (_valor(linha_normalizada, COLUNA_EMAIL) or "").strip() or extrair_email(texto),
+        "telefone": (_valor(linha_normalizada, COLUNA_TELEFONE) or "").strip() or extrair_telefone(texto),
+        "cidade": (_valor(linha_normalizada, COLUNA_CIDADE) or "").strip() or extrair_cidade(texto),
         "linkedin": extrair_linkedin(texto),
         "formacao_nivel": nivel_formacao,
         "formacao_area": area_formacao,
@@ -168,17 +187,19 @@ def importar_candidaturas_forms(empresa_id: int, sheet_id: str) -> dict:
     ignorados_sem_texto = 0
     vagas_nao_encontradas = []
 
-    for linha in linhas:
-        texto = (linha.get(COLUNA_TEXTO) or "").strip()
+    for linha_bruta in linhas:
+        linha = _normalizar_linha(linha_bruta)
+
+        texto = (_valor(linha, COLUNA_TEXTO) or "").strip()
         if len(texto) < 20:
             ignorados_sem_texto += 1
             continue
 
-        nome_vaga_digitado = (linha.get(COLUNA_VAGA) or "").strip()
+        nome_vaga_digitado = (_valor(linha, COLUNA_VAGA) or "").strip()
         vaga_id, vaga = _casar_vaga(empresa_id, nome_vaga_digitado)
         if vaga_id is None:
             vagas_nao_encontradas.append({
-                "candidato": linha.get(COLUNA_NOME, "?"),
+                "candidato": _valor(linha, COLUNA_NOME) or "?",
                 "vaga_digitada": nome_vaga_digitado,
             })
             continue
@@ -188,7 +209,7 @@ def importar_candidaturas_forms(empresa_id: int, sheet_id: str) -> dict:
         # Hash de deduplicação: como não existe arquivo físico pra gerar
         # hash de bytes (como no upload normal), usamos o timestamp da
         # submissão + email como identificador único e estável da linha.
-        chave_dedup = f"{linha.get(COLUNA_TIMESTAMP, '')}|{dados.get('email', '')}"
+        chave_dedup = f"{_valor(linha, COLUNA_TIMESTAMP) or ''}|{dados.get('email', '')}"
         hash_arquivo = gerar_hash_arquivo(chave_dedup.encode("utf-8"))
 
         ja_existe = db.curriculo_ja_analisado(empresa_id, hash_arquivo)
