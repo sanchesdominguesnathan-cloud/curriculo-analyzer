@@ -57,7 +57,9 @@ from keywords import listar_todas_palavras_chave_sugeridas
 #
 # Como pegar o sheet_id: é o trecho da URL entre "/d/" e "/edit".
 SHEET_IDS_POR_EMPRESA = {
-    # 1: "1M6VHZHefthzgQ81X6lqafEVx3NPuvuSf-npTy8MYcBU",  # <- exemplo, ajuste o empresa_id certo
+    1: "1M6VHZHefthzgQ81X6lqafEVx3NPuvuSf-npTy8MYcBU",  # Teste
+    3: "SHEET_ID_DA_SEB_EDUCATION_AQUI",                # SEB education
+    4: "SHEET_ID_DO_INSTITUTO_INTEGRATO_AQUI",          # Instituto Integrato
 }
 
 
