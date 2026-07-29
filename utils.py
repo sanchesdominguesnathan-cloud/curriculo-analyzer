@@ -38,10 +38,15 @@ MESES_PT = {
     "jul": 7, "ago": 8, "set": 9, "out": 10, "nov": 11, "dez": 12,
 }
 
+# Classe de caracteres usada para nomes de mês por extenso. Inclui letras
+# acentuadas (ex: "março") porque extrair_periodos roda sobre o texto
+# ORIGINAL do currículo, ainda não normalizado (sem remover acentos).
+_LETRAS_MES = r"a-zçãáéíóúâêôà"
+
 PADRAO_PERIODO = re.compile(
-    r"(?P<inicio>(\d{1,2}[/\-]\d{4})|(\d{4})|([a-zA-ço]{3,10}\s*[/\-]?\s*\d{4}))"
+    r"(?P<inicio>(\d{1,2}[/\-]\d{4})|(\d{4})|([" + _LETRAS_MES + r"]{3,10}\s*(?:de\s+)?[/\-]?\s*\d{4}))"
     r"\s*(?:a|até|-|–|—)\s*"
-    r"(?P<fim>(\d{1,2}[/\-]\d{4})|(\d{4})|([a-zA-ço]{3,10}\s*[/\-]?\s*\d{4})|atual|presente|atualmente)",
+    r"(?P<fim>(\d{1,2}[/\-]\d{4})|(\d{4})|([" + _LETRAS_MES + r"]{3,10}\s*(?:de\s+)?[/\-]?\s*\d{4})|atual|presente|atualmente)",
     re.IGNORECASE
 )
 
@@ -52,8 +57,10 @@ def _parse_data_flexivel(texto_data: str, fim_periodo=False):
     if texto_data in ("atual", "presente", "atualmente", "hoje"):
         return datetime.now()
 
-    # formato mes/ano por extenso: "janeiro 2020" ou "jan/2020"
-    m = re.match(r"([a-zço]+)\s*[/\-]?\s*(\d{4})", texto_data)
+    # formato mes/ano por extenso: "janeiro 2020", "jan/2020" ou, escrito em
+    # prosa, "janeiro de 2020" (com a preposição "de" entre o mês e o ano —
+    # muito comum em currículos colados como texto corrido, ex: Google Forms).
+    m = re.match(r"([" + _LETRAS_MES + r"]+)\s*(?:de\s+)?[/\-]?\s*(\d{4})", texto_data)
     if m:
         mes_txt, ano_txt = m.groups()
         mes_txt_norm = normalizar_texto(mes_txt)
@@ -88,8 +95,9 @@ def _parse_data_flexivel(texto_data: str, fim_periodo=False):
 
 
 def extrair_periodos(texto: str):
-    """Encontra todos os períodos (ex: 'jan/2020 a dez/2022') em um texto
-    e retorna lista de tuplas (data_inicio, data_fim) em meses."""
+    """Encontra todos os períodos (ex: 'jan/2020 a dez/2022' ou
+    'janeiro de 2021 a dezembro de 2023') em um texto e retorna lista de
+    tuplas (data_inicio, data_fim)."""
     periodos = []
     for match in PADRAO_PERIODO.finditer(texto):
         inicio_txt = match.group("inicio")
