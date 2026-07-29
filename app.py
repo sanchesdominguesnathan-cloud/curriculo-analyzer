@@ -7,6 +7,7 @@ Execução local:
 """
 
 import io
+import forms_import
 
 import streamlit as st
 import pandas as pd
@@ -64,6 +65,9 @@ def _init_session():
 
 def _obter_codigo_cadastro():
     """Código de acesso exigido para criar uma nova conta de empresa."""
+    valor = os.environ.get("CODIGO_CADASTRO")
+    if valor:
+        return valor
     try:
         return st.secrets.get("CODIGO_CADASTRO", None)
     except Exception:
@@ -210,6 +214,39 @@ def secao_vaga(empresa_id: int):
 
     return vaga_ativa
 
+def secao_importar_forms(empresa_id: int):
+    sheet_id = forms_import.SHEET_IDS_POR_EMPRESA.get(empresa_id)
+    if not sheet_id:
+        return  # essa empresa ainda não tem um Forms configurado
+
+    with st.expander("📥 Importar candidaturas recebidas por e-mail (Google Forms)"):
+        st.caption(
+            "Candidatos que mandaram o currículo colado no corpo do e-mail "
+            "podem ser cadastrados manualmente nesse formulário pelo "
+            "recrutador. Clique abaixo pra trazer as candidaturas novas."
+        )
+        if st.button("🔄 Importar candidaturas novas", key="importar_forms_btn"):
+            with st.spinner("Lendo a planilha e processando os currículos..."):
+                try:
+                    resumo = forms_import.importar_candidaturas_forms(empresa_id, sheet_id)
+                except Exception as e:
+                    st.error(f"Erro ao importar do Forms: {e}")
+                    return
+
+            if resumo["importados"] > 0:
+                st.success(f"✅ {resumo['importados']} candidato(s) novo(s) importado(s).")
+                st.session_state.ultima_vaga_carregada = None
+                st.rerun()
+            else:
+                st.info("Nenhuma candidatura nova encontrada na planilha.")
+
+            if resumo["ignorados_sem_texto"] > 0:
+                st.warning(f"⚠️ {resumo['ignorados_sem_texto']} linha(s) ignorada(s) por não ter currículo preenchido.")
+
+            if resumo["vagas_nao_encontradas"]:
+                st.warning("⚠️ Candidatos com vaga não reconhecida:")
+                for item in resumo["vagas_nao_encontradas"]:
+                    st.caption(f"- {item['candidato']} → vaga digitada: \"{item['vaga_digitada']}\"")
 
 def secao_cabecalho():
     st.title(" Análise Automática de Currículos")
@@ -635,6 +672,7 @@ def main():
 
     empresa = st.session_state.empresa_logada
     empresa_id = empresa["id"]
+    secao_importar_forms(empresa_id)
 
     col_titulo, col_logout = st.columns([5, 1])
     with col_logout:
