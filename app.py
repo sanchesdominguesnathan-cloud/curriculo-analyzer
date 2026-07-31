@@ -58,6 +58,9 @@ def _init_session():
         "empresa_logada": None,
         # Correção #11: contador de tentativas de login para bloquear brute force.
         "tentativas_login": 0,
+        # Correção #19: cidade da vaga ativa, usada para recalcular a
+        # tabela de resultados quando uma decisão manual é registrada.
+        "cidade_vaga_atual": "",
     }
     for chave, valor in defaults.items():
         if chave not in st.session_state:
@@ -212,6 +215,12 @@ def secao_vaga(empresa_id: int):
             st.session_state.df_resultados = pd.DataFrame()
 
         st.session_state.ultima_vaga_carregada = chave_vaga_atual
+
+    # Correção #19: guarda a cidade da vaga assim que ela é carregada (não
+    # só depois de rodar uma análise), para que a atualização da decisão
+    # manual (Aprovar/Talvez/Reprovar) consiga recalcular a tabela mesmo
+    # se o usuário só reabriu uma vaga já salva, sem enviar currículos novos.
+    st.session_state.cidade_vaga_atual = vaga_ativa.get("cidade_vaga", "")
 
     return vaga_ativa
 
@@ -494,6 +503,33 @@ def texto_status_com_icone(status):
     return icones.get(status, status)
 
 
+def _registrar_decisao_manual(id_banco: int, decisao: str, candidato_original: dict):
+    """Registra a decisão do recrutador no banco e atualiza o session_state
+    na hora, para que a tabela e o dashboard reflitam a mudança imediatamente.
+
+    Correção #19: antes, db.registrar_decisao só gravava na tabela
+    `decisoes` (usada pelo sistema de aprendizado) e a função parava por
+    aí — o candidato em si nunca era atualizado, então clicar em
+    Aprovar/Talvez/Reprovar não tinha nenhum efeito visível na tela. Além
+    de já termos corrigido isso no lado do banco (coluna
+    `decisao_manual` em `curriculos`), aqui também atualizamos o
+    session_state e recalculamos `df_resultados` na hora, em vez de
+    depender de o usuário recarregar a vaga manualmente para ver o
+    resultado."""
+    db.registrar_decisao(id_banco, decisao)
+
+    if candidato_original is not None:
+        candidato_original["status"] = decisao
+        candidato_original["decisao_manual"] = decisao
+
+    st.session_state.df_resultados = ranking.montar_tabela_resultados(
+        st.session_state.resultados,
+        cidade_vaga=st.session_state.get("cidade_vaga_atual", ""),
+    )
+    st.success(f"Decisão '{decisao}' registrada — a tabela e o dashboard já foram atualizados.")
+    st.rerun()
+
+
 def secao_resultados(df_filtrado: pd.DataFrame):
     st.header("5. Resultados")
     if df_filtrado.empty:
@@ -551,15 +587,20 @@ def secao_resultados(df_filtrado: pd.DataFrame):
                 else:
                     st.caption("📎 Arquivo disponível apenas na sessão em que foi enviado.")
 
-                col_ap, col_rep = st.columns(2)
                 id_banco = candidato_original.get("_id_banco") if candidato_original else None
                 if id_banco:
+                    # Correção #19: adicionado o botão "Talvez", que faltava
+                    # (a tabela já tinha cor/ícone prontos pra esse status,
+                    # mas não existia como opção de decisão manual).
+                    col_ap, col_talvez, col_rep = st.columns(3)
                     if col_ap.button("✅ Aprovar", key=f"aprovar_{id_banco}"):
-                        db.registrar_decisao(id_banco, "Aprovado manualmente")
-                        st.success("Decisão registrada. O sistema usará isso para aprender.")
+                        _registrar_decisao_manual(id_banco, "Aprovado", candidato_original)
+                    if col_talvez.button("🤔 Talvez", key=f"talvez_{id_banco}"):
+                        _registrar_decisao_manual(id_banco, "Talvez", candidato_original)
                     if col_rep.button("❌ Reprovar", key=f"reprovar_{id_banco}"):
-                        db.registrar_decisao(id_banco, "Reprovado manualmente")
-                        st.success("Decisão registrada. O sistema usará isso para aprender.")
+                        _registrar_decisao_manual(id_banco, "Reprovado", candidato_original)
+                else:
+                    st.caption("Decisão manual disponível após a análise ser salva no histórico.")
 
     secao_exportacao(df_filtrado[colunas_exibicao])
 
