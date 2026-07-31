@@ -13,8 +13,9 @@ Responsabilidades:
 - Salvar vagas (descrição, palavras-chave, cidade) por empresa.
 - Salvar currículos já analisados (evitando reprocessar o mesmo arquivo
   dentro da mesma empresa), vinculados a uma vaga.
-- Registrar decisões da recrutadora (Aprovado/Reprovado manual) para
-  alimentar o sistema de aprendizado.
+- Registrar decisões da recrutadora (Aprovado/Talvez/Reprovado manual),
+  tanto para alimentar o sistema de aprendizado quanto para sobrepor o
+  status exibido do candidato.
 """
 
 import os
@@ -131,6 +132,18 @@ def inicializar_banco():
             )
         """)
 
+        # Correção #19: coluna nova para guardar a decisão manual mais
+        # recente do recrutador (Aprovado/Talvez/Reprovado), separada do
+        # status automático calculado pelo score. Antes, clicar em
+        # Aprovar/Reprovar só gravava um registro na tabela `decisoes`
+        # (usada apenas pelo sistema de aprendizado) e não tinha efeito
+        # nenhum visível na tabela nem no dashboard — o clique parecia não
+        # fazer nada. ADD COLUMN IF NOT EXISTS é seguro de rodar em bancos
+        # que já existem em produção, sem precisar de migração manual.
+        cur.execute("""
+            ALTER TABLE curriculos ADD COLUMN IF NOT EXISTS decisao_manual TEXT
+        """)
+
         # Correção #18: índices para as queries de busca mais frequentes.
         # Sem eles, cada consulta faz seq scan na tabela inteira.
         cur.execute("""
@@ -205,6 +218,19 @@ def alterar_status_empresa(empresa_id: int, ativo: bool):
 # Currículos
 # ---------------------------------------------------------------------------
 
+def _aplicar_decisao_manual(dados: dict, decisao_manual):
+    """Se o recrutador já tomou uma decisão manual (Aprovado/Talvez/Reprovado)
+    para esse candidato, ela passa a valer como o status "oficial" exibido
+    na tabela e no dashboard — sobrepondo o status automático calculado
+    pelo score. O status automático original fica preservado em
+    'status_automatico', caso seja útil de consultar depois."""
+    dados["status_automatico"] = dados.get("status")
+    if decisao_manual:
+        dados["status"] = decisao_manual
+    dados["decisao_manual"] = decisao_manual
+    return dados
+
+
 def curriculo_ja_analisado(empresa_id: int, hash_arquivo: str):
     with conectar() as conn:
         cur = conn.cursor()
@@ -226,6 +252,7 @@ def curriculo_ja_analisado(empresa_id: int, hash_arquivo: str):
             # do banco — esses bytes já foram processados e não precisam
             # ficar acumulados na memória da sessão.
             dados.pop("conteudo_bytes", None)
+            dados = _aplicar_decisao_manual(dados, linha.get("decisao_manual"))
             return dados
         return None
 
@@ -275,11 +302,33 @@ def salvar_curriculo(empresa_id: int, hash_arquivo: str, nome_arquivo: str, dado
 
 
 def registrar_decisao(curriculo_id: int, decisao: str):
+    """Registra a decisão manual do recrutador sobre um candidato
+    (espera-se "Aprovado", "Talvez" ou "Reprovado").
+
+    Correção #19: antes, essa função só inseria um registro na tabela
+    `decisoes` — histórico usado exclusivamente por
+    calcular_ajuste_aprendizado (sistema de aprendizado) — mas nunca
+    atualizava o candidato em si. Por isso, clicar em Aprovar/Reprovar na
+    interface não tinha nenhum efeito visível: a tabela e o dashboard
+    continuavam mostrando o status calculado automaticamente pelo score,
+    dando a impressão de que o botão não fazia nada (mesmo a decisão
+    estando, de fato, salva no banco).
+
+    Agora, além de manter o histórico em `decisoes` (necessário para o
+    aprendizado continuar funcionando com múltiplas decisões ao longo do
+    tempo), também atualizamos `curriculos.decisao_manual` com a decisão
+    mais recente — essa coluna passa a valer como o status "oficial" do
+    candidato, sobrepondo o automático, tanto na tabela quanto no
+    dashboard, e persistindo entre sessões."""
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO decisoes (curriculo_id, decisao, data_decisao) VALUES (%s, %s, %s)",
             (curriculo_id, decisao, datetime.now()),
+        )
+        cur.execute(
+            "UPDATE curriculos SET decisao_manual = %s WHERE id = %s",
+            (decisao, curriculo_id),
         )
         cur.close()
 
@@ -354,6 +403,7 @@ def listar_curriculos_por_vaga(empresa_id: int, vaga_id: int):
             dados["hash_arquivo"] = linha["hash_arquivo"]
             # conteudo_bytes não é persistido (correção #12), então não
             # tenta recuperá-lo aqui.
+            dados = _aplicar_decisao_manual(dados, linha.get("decisao_manual"))
             resultados.append(dados)
         cur.close()
         return resultados
