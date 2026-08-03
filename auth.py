@@ -6,13 +6,26 @@ compilação nativa (evita problemas de instalação em serviços de nuvem).
 """
 import hashlib
 import secrets
+import unicodedata
 
 ITERACOES_PBKDF2 = 200_000
 
 
 def gerar_hash_senha(senha: str, salt: str = None) -> tuple:
     """Gera o hash de uma senha. Se 'salt' não for informado, gera um novo
-    (usado ao criar a conta). Retorna (hash_hex, salt_hex)."""
+    (usado ao criar a conta). Retorna (hash_hex, salt_hex).
+
+    Correção #20: a senha é normalizada em Unicode (forma NFC) antes de
+    virar bytes. Sem isso, a MESMA senha visualmente idêntica (ex:
+    "café123!") podia gerar hashes diferentes dependendo de como o
+    sistema operacional, teclado ou navegador representa o acento
+    internamente por baixo dos panos (caractere "é" precomposto vs. "e" +
+    acento combinando separado) — fazendo o login falhar com uma senha que
+    parece 100% certa na tela. Como verificar_senha chama esta função, a
+    correção cobre os dois fluxos (cadastro e login) automaticamente, sem
+    precisar mexer em mais nenhum lugar.
+    """
+    senha = unicodedata.normalize("NFC", senha)
     if salt is None:
         salt = secrets.token_hex(16)
     hash_senha = hashlib.pbkdf2_hmac(
@@ -30,7 +43,6 @@ def verificar_senha(senha_digitada: str, hash_salvo: str, salt_salvo: str) -> bo
 
 def senha_e_forte(senha: str) -> tuple:
     """Validação de força de senha. Retorna (ok: bool, motivo: str).
-
     Correção #3: adicionada exigência de caractere especial.
     Antes aceitava 'Senha123' como senha forte.
     """
