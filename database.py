@@ -264,14 +264,33 @@ def salvar_curriculo(empresa_id: int, hash_arquivo: str, nome_arquivo: str, dado
     sem conflito (cada uma tem seu próprio 'hash_arquivo' com escopo de
     empresa_id).
 
-    Correção #12: texto_bruto e conteudo_bytes são excluídos antes de
-    serializar — podem ultrapassar 100 KB por currículo e não precisam
-    ser persistidos (texto_bruto é reprocessado se necessário;
-    conteudo_bytes é servido via download direto do arquivo original).
+    Correção #12 / #20: campos transitórios são excluídos antes de
+    serializar para JSON.
+
+    Bug real corrigido aqui: o filtro antigo procurava por "texto_bruto",
+    mas o nome de fato usado no resto do código sempre foi
+    "_texto_bruto_temp" — ou seja, o filtro nunca excluía nada, e o texto
+    integral de cada currículo (nome, CPF, endereço, telefone...) estava
+    sendo salvo permanentemente no banco. Além disso, "_bytes_download"
+    (os bytes binários do PDF/DOCX original) também não estava na lista
+    de exclusão, e — como json.dumps usa default=str para campos não
+    serializáveis — os bytes do arquivo inteiro viravam uma string
+    ilegível dentro de dados_json, inchando o banco desnecessariamente.
+
+    A checagem fica centralizada AQUI (e não em quem chama essa função)
+    de propósito: mesmo que outro ponto do código no futuro esqueça de dar
+    pop() nesses campos antes de chamar salvar_curriculo, eles nunca vão
+    parar no banco.
     """
+    CAMPOS_NAO_PERSISTIDOS = {
+        "texto_bruto", "conteudo_bytes",   # nomes legados/alternativos
+        "_texto_bruto_temp",   # texto bruto do currículo — pode conter PII sensível
+        "_bytes_download",     # bytes binários do arquivo original — nunca deve virar JSON
+        "_id_banco",           # é o próprio id da linha; redundante persistir dentro do JSON
+    }
     dados_para_salvar = {
         k: v for k, v in dados.items()
-        if k not in ("texto_bruto", "conteudo_bytes")
+        if k not in CAMPOS_NAO_PERSISTIDOS
     }
 
     with conectar() as conn:
