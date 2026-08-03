@@ -328,8 +328,29 @@ def secao_entrada(empresa_id: int, vaga_ativa: dict):
             key=f"input_desejaveis_{sufixo_widget}",
         )
 
-    palavras_obrigatorias_lista = [p.strip() for p in texto_obrigatorias.split(",") if p.strip()]
-    palavras_desejaveis_lista = [p.strip() for p in texto_desejaveis.split(",") if p.strip()]
+    # Correção #20: remove palavras-chave duplicadas (ignorando maiúsculas/
+    # minúsculas) antes de gerar os sliders de peso. Sem isso, digitar a
+    # mesma palavra duas vezes (ex: "Excel, Power BI, Excel") gerava dois
+    # sliders com a MESMA key no Streamlit e travava a tela inteira com um
+    # erro de "elemento duplicado". Também evita contar a mesma competência
+    # duas vezes na pontuação (ex: "Excel" e "excel" juntos inflando o peso
+    # desse critério sem o recrutador perceber).
+    def _dedup_preservando_ordem(itens):
+        vistos = set()
+        resultado = []
+        for item in itens:
+            chave = item.lower()
+            if chave not in vistos:
+                vistos.add(chave)
+                resultado.append(item)
+        return resultado
+
+    palavras_obrigatorias_lista = _dedup_preservando_ordem(
+        p.strip() for p in texto_obrigatorias.split(",") if p.strip()
+    )
+    palavras_desejaveis_lista = _dedup_preservando_ordem(
+        p.strip() for p in texto_desejaveis.split(",") if p.strip()
+    )
 
     pesos_salvos_obrig = vaga_ativa.get("obrigatorias", {})
     pesos_salvos_desej = vaga_ativa.get("desejaveis", {})
@@ -394,6 +415,18 @@ def processar_analise(empresa_id, arquivos, descricao_vaga, cidade_vaga, pesos_o
     if not todas_palavras:
         todas_palavras = listar_todas_palavras_chave_sugeridas()
 
+    # Correção #20: avisa a recrutadora se ela esqueceu de definir
+    # palavras-chave — sem isso, o score.py agora usa só experiência,
+    # formação e idiomas pra pontuar (em vez de inflar a nota de todo
+    # mundo pra 100% "de brinde" nesse critério, como acontecia antes).
+    if not pesos_obrigatorias and not pesos_desejaveis:
+        st.warning(
+            "⚠️ Nenhuma palavra-chave obrigatória ou desejável foi definida "
+            "pra essa vaga. A pontuação será calculada só com base em "
+            "experiência, formação e idiomas — considere preencher as "
+            "palavras-chave na seção 2 pra um resultado mais preciso."
+        )
+
     novos_resultados = []
     barra = st.progress(0, text="Iniciando análise...")
 
@@ -403,40 +436,79 @@ def processar_analise(empresa_id, arquivos, descricao_vaga, cidade_vaga, pesos_o
         hash_arquivo = gerar_hash_arquivo(conteudo_bytes)
 
         ja_analisado = db.curriculo_ja_analisado(empresa_id, hash_arquivo)
+
+        # Correção #20: mesmo que esse arquivo já tenha sido analisado
+        # antes, o texto é reextraído e a pontuação é SEMPRE recalculada
+        # com os pesos atuais das palavras-chave. Antes, se a recrutadora
+        # ajustava um peso e clicava em "Analisar" de novo sem trocar os
+        # arquivos, o sistema só reaproveitava a pontuação antiga — o
+        # ajuste do peso não tinha nenhum efeito, silenciosamente.
+        #
+        # Isso é feito reextraindo o texto do arquivo recém-enviado (os
+        # bytes já estão em memória nesta mesma chamada), em vez de
+        # depender de um texto bruto salvo no banco — que, de propósito,
+        # não guardamos mais (ver Correção #20 no database.py).
+        texto_extraido = None
         if ja_analisado:
-            st.info(f"⏭️ '{arquivo.name}' já havia sido analisado anteriormente. Reaproveitando resultado salvo.")
-            # Correção #4: conteudo_bytes não é reanexado ao resultado
-            # recuperado do banco — serve apenas para o download imediato,
-            # então é mantido só neste escopo local e descartado depois.
+            try:
+                texto_extraido = curriculo_parser.extrair_texto(arquivo.name, conteudo_bytes)
+            except Exception:
+                texto_extraido = None
+
+        if ja_analisado and texto_extraido:
+            dados = dict(ja_analisado)  # reaproveita nome/telefone/cidade/idiomas já extraídos
+            dados["_texto_bruto_temp"] = texto_extraido
+        elif ja_analisado:
+            # Não foi possível reler o arquivo agora (ex: arquivo
+            # corrompido nesse reenvio) — mantém o resultado salvo
+            # anteriormente em vez de travar a análise inteira.
+            st.info(
+                f"⏭️ '{arquivo.name}' já havia sido analisado, mas não foi "
+                "possível reler o conteúdo agora — mantendo a pontuação "
+                "salva anteriormente."
+            )
             ja_analisado["_bytes_download"] = conteudo_bytes
             novos_resultados.append(ja_analisado)
             continue
-
-        try:
-            dados = curriculo_parser.processar_curriculo(arquivo.name, conteudo_bytes, todas_palavras)
-        except ValueError as e:
-            st.error(str(e))
-            continue
+        else:
+            try:
+                dados = curriculo_parser.processar_curriculo(arquivo.name, conteudo_bytes, todas_palavras)
+            except ValueError as e:
+                st.error(str(e))
+                continue
 
         ajuste = db.calcular_ajuste_aprendizado(empresa_id, dados.get("competencias_encontradas", []))
         resultado_score = score_module.calcular_score_final(
             dados, pesos_obrigatorias, pesos_desejaveis, ajuste_aprendizado=ajuste
         )
         dados.update(resultado_score)
+        dados["status_automatico"] = resultado_score["status"]
         dados["resumo"] = gerar_resumo_candidato(dados)
         dados["hash_arquivo"] = hash_arquivo
 
-        # Correção #4: bytes do arquivo ficam apenas no campo _bytes_download,
-        # separado dos dados do candidato. Não são serializados no banco
-        # (database.py já exclui conteudo_bytes), e não precisam ficar
-        # acumulados em session_state entre re-renders.
+        # Correção #19: se esse candidato já tinha recebido uma decisão
+        # manual do recrutador (Aprovado/Talvez/Reprovado), ela continua
+        # valendo mesmo depois de recalcular a pontuação automática — só
+        # o "status_automatico" é que reflete o novo cálculo.
+        if ja_analisado and ja_analisado.get("decisao_manual"):
+            dados["status"] = ja_analisado["decisao_manual"]
+            dados["decisao_manual"] = ja_analisado["decisao_manual"]
+
+        # Correção #4: bytes do arquivo ficam apenas no campo
+        # _bytes_download, usados só pro botão de download nesta mesma
+        # sessão — nunca são persistidos no banco.
         dados["_bytes_download"] = conteudo_bytes
+
+        # Correção #20: remove o texto bruto ANTES de chamar
+        # salvar_curriculo — antes essa linha vinha DEPOIS do salvamento,
+        # o que não tinha efeito nenhum (o dado já tinha sido serializado
+        # e enviado pro banco). Mesmo com o database.py agora blindado
+        # contra esse campo (defesa em profundidade), a ordem correta
+        # aqui evita depender só da proteção do outro arquivo.
+        dados.pop("_texto_bruto_temp", None)
 
         id_banco = db.salvar_curriculo(empresa_id, hash_arquivo, arquivo.name, dados, descricao_vaga, vaga_id=vaga_id)
         dados["_id_banco"] = id_banco
-
-        # Remove o campo temporário de texto bruto após o score ser calculado
-        dados.pop("_texto_bruto_temp", None)
 
         novos_resultados.append(dados)
 
@@ -734,17 +806,33 @@ def main():
 
     st.header("3. Análise")
     if st.button(" Analisar", type="primary"):
-        vaga_id_para_salvar = st.session_state.vaga_id_ativa
-        if vaga_id_para_salvar is None and (vaga_ativa.get("nome") or "").strip():
-            vaga_id_para_salvar = db.salvar_vaga(
-                empresa_id, vaga_ativa["nome"].strip(), descricao_vaga, pesos_obrigatorias, pesos_desejaveis, cidade_vaga
-            )
-            st.session_state.vaga_id_ativa = vaga_id_para_salvar
+        nome_vaga_atual = (vaga_ativa.get("nome") or "").strip()
 
-        processar_analise(
-            empresa_id, arquivos, descricao_vaga, cidade_vaga, pesos_obrigatorias, pesos_desejaveis,
-            vaga_id=vaga_id_para_salvar,
-        )
+        # Correção #20: bloqueia a análise se a vaga ainda não tem nome.
+        # Antes, isso era permitido silenciosamente — os currículos eram
+        # analisados e mostrados na tela normalmente, mas salvos com
+        # vaga_id nulo. Na próxima vez que o recrutador entrasse no
+        # sistema, esses candidatos não apareciam em NENHUMA vaga da
+        # lista, dando a impressão de que os dados tinham sumido.
+        if vaga_ativa.get("id") is None and not nome_vaga_atual:
+            st.error(
+                "⚠️ Dê um nome pra essa vaga antes de analisar (campo no "
+                "topo da seção '1. Vaga e Currículos'). Sem nome, os "
+                "candidatos analisados não ficam vinculados a nenhuma "
+                "vaga e não aparecem mais depois."
+            )
+        else:
+            vaga_id_para_salvar = st.session_state.vaga_id_ativa
+            if vaga_id_para_salvar is None and nome_vaga_atual:
+                vaga_id_para_salvar = db.salvar_vaga(
+                    empresa_id, nome_vaga_atual, descricao_vaga, pesos_obrigatorias, pesos_desejaveis, cidade_vaga
+                )
+                st.session_state.vaga_id_ativa = vaga_id_para_salvar
+
+            processar_analise(
+                empresa_id, arquivos, descricao_vaga, cidade_vaga, pesos_obrigatorias, pesos_desejaveis,
+                vaga_id=vaga_id_para_salvar,
+            )
 
     if not st.session_state.df_resultados.empty:
         df_filtrado = secao_filtros(st.session_state.df_resultados)
