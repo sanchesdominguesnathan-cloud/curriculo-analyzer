@@ -7,6 +7,10 @@ Calcula a pontuação final de um candidato com base em:
 - Idiomas (5%)
 - Cursos/competências desejáveis (5%)
 
+Se a vaga não tiver palavras-chave obrigatórias e/ou desejáveis definidas,
+o peso desses critérios é redistribuído entre os critérios que realmente
+têm dado pra avaliar (ver Correção #20 em calcular_score_final).
+
 Também aplica ajuste de aprendizado com base em decisões passadas da
 recrutadora (aprovações/reprovações), via database.py.
 """
@@ -51,6 +55,13 @@ def pontuar_palavras(texto: str, palavras_com_peso: dict) -> tuple:
     """
     palavras_com_peso: dict {palavra_chave: peso}
     Retorna (pontuacao_percentual_0_a_100, lista_encontradas, lista_faltantes)
+
+    Nota: quando palavras_com_peso está vazio, retorna 100.0 por
+    convenção — mas esse valor só deve ser usado se o critério de fato
+    entrar no cálculo do score final. Ver Correção #20 em
+    calcular_score_final, que exclui esse critério do peso quando não há
+    nenhuma palavra-chave configurada, em vez de deixar esse 100.0
+    "de brinde" inflar a nota de todo mundo.
     """
     if not palavras_com_peso:
         return 100.0, [], []
@@ -110,6 +121,18 @@ def calcular_score_final(
 
     Correção #12: usa _texto_bruto_temp (presente apenas durante o
     processamento, não persistido no banco) em vez de texto_bruto.
+
+    Correção #20: antes, quando a vaga não tinha nenhuma palavra-chave
+    obrigatória e/ou desejável cadastrada, pontuar_palavras retornava
+    100.0 "de brinde" pra esse critério — e como "obrigatorias" sozinho
+    vale 60% do score, um candidato com ZERO competências relevantes
+    identificadas (ex: 1 ano de experiência, sem nenhuma palavra-chave
+    batendo) já saía como "Aprovado" só por a vaga estar mal configurada.
+    Agora, se um critério não tem dado nenhum pra avaliar (a recrutadora
+    não definiu palavras-chave pra ele), ele é excluído do cálculo e seu
+    peso é redistribuído proporcionalmente entre os critérios que
+    realmente têm base pra pontuar (experiência, formação, idiomas, e o
+    outro grupo de palavras-chave, se houver).
     """
     texto = dados_curriculo.get("_texto_bruto_temp", "")
 
@@ -119,12 +142,31 @@ def calcular_score_final(
     score_form = pontuar_formacao(dados_curriculo.get("formacao_nivel"))
     score_idio = pontuar_idiomas(dados_curriculo.get("idiomas", {}))
 
-    score_final = (
-        score_obrig * PESOS_CRITERIOS["obrigatorias"]
-        + score_exp * PESOS_CRITERIOS["experiencia"]
-        + score_form * PESOS_CRITERIOS["formacao"]
-        + score_idio * PESOS_CRITERIOS["idiomas"]
-        + score_desej * PESOS_CRITERIOS["desejaveis"]
+    scores_por_criterio = {
+        "obrigatorias": score_obrig,
+        "experiencia": score_exp,
+        "formacao": score_form,
+        "idiomas": score_idio,
+        "desejaveis": score_desej,
+    }
+
+    # Correção #20: monta o conjunto de pesos "ativos" (critérios com dado
+    # real pra avaliar) e renormaliza para somar 1.0 — se nada foi
+    # excluído, o resultado é idêntico ao comportamento original.
+    pesos_ativos = dict(PESOS_CRITERIOS)
+    obrigatorias_sem_criterio = not palavras_obrigatorias
+    desejaveis_sem_criterio = not palavras_desejaveis
+    if obrigatorias_sem_criterio:
+        pesos_ativos.pop("obrigatorias", None)
+    if desejaveis_sem_criterio:
+        pesos_ativos.pop("desejaveis", None)
+
+    soma_pesos_ativos = sum(pesos_ativos.values()) or 1.0
+    pesos_normalizados = {k: v / soma_pesos_ativos for k, v in pesos_ativos.items()}
+
+    score_final = sum(
+        scores_por_criterio[criterio] * peso
+        for criterio, peso in pesos_normalizados.items()
     )
 
     score_final = max(0, min(100, score_final + ajuste_aprendizado))
@@ -146,11 +188,13 @@ def calcular_score_final(
                 "score": score_obrig,
                 "encontradas": encontradas_obrig,
                 "faltantes": faltantes_obrig,
+                "sem_criterio_definido": obrigatorias_sem_criterio,
             },
             "desejaveis": {
                 "score": score_desej,
                 "encontradas": encontradas_desej,
                 "faltantes": faltantes_desej,
+                "sem_criterio_definido": desejaveis_sem_criterio,
             },
             "experiencia": {"score": score_exp},
             "formacao": {"score": score_form},
