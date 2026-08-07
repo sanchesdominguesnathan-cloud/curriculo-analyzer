@@ -58,7 +58,7 @@ from keywords import listar_todas_palavras_chave_sugeridas
 # Como pegar o sheet_id: é o trecho da URL entre "/d/" e "/edit".
 SHEET_IDS_POR_EMPRESA = {
     1: "11PTdjVSPDFwseWn1_Pdck1f9eZSma01bGBxzqZ4mcOc", #Teste da entrada do forms
-    4: "11NuyNHEbFeW7BuTXjOdyAWGfvRxQLym4gSZSvMShoG8/edit", #Gabriela 
+    4: "11NuyNHEbFeW7BuTXjOdyAWGfvRxQLym4gSZSvMShoG8", #Gabriela 
 }
 
 
