@@ -634,46 +634,48 @@ def secao_resultados(df_filtrado: pd.DataFrame):
     )
 
     st.subheader("Detalhes e decisão por candidato")
-    for _, linha in df_filtrado.iterrows():
-        with st.expander(f"#{linha['Ranking']} — {linha['Nome']} ({linha['Status']}, {linha['Pontuação']} pts)"):
-            colA, colB = st.columns([2, 1])
-            with colA:
-                st.markdown(f"**Resumo:** {linha['Resumo']}")
-                st.markdown(f"**Email:** {linha['Email']} | **Telefone:** {linha['Telefone']}")
-                st.markdown(f"**LinkedIn:** {linha['LinkedIn']}")
-            with colB:
-           candidato_original = next(
-    (r for r in st.session_state.resultados if r.get("hash_arquivo") == linha["Hash"]),
-    None
-)
-                # Correção #4: bytes para download ficam em _bytes_download,
-                # não em conteudo_bytes. Candidatos recuperados do banco
-                # (sem _bytes_download) não exibem o botão de download.
-                bytes_download = candidato_original.get("_bytes_download") if candidato_original else None
-                if bytes_download:
-                    st.download_button(
-                        "📎 Abrir currículo",
-                        data=bytes_download,
-                        file_name=linha["Arquivo"],
-                        key=f"download_{linha['Arquivo']}_{linha['Ranking']}",
-                    )
-                else:
-                    st.caption("📎 Arquivo disponível apenas na sessão em que foi enviado.")
+  for _, linha in df_filtrado.iterrows():
+    with st.expander(f"#{linha['Ranking']} — {linha['Nome']} ({linha['Status']}, {linha['Pontuação']} pts)"):
+        colA, colB = st.columns([2, 1])
 
-                id_banco = candidato_original.get("_id_banco") if candidato_original else None
-                if id_banco:
-                    # Correção #19: adicionado o botão "Talvez", que faltava
-                    # (a tabela já tinha cor/ícone prontos pra esse status,
-                    # mas não existia como opção de decisão manual).
-                    col_ap, col_talvez, col_rep = st.columns(3)
-                    if col_ap.button("✅ Aprovar", key=f"aprovar_{id_banco}"):
-                        _registrar_decisao_manual(id_banco, "Aprovado", candidato_original)
-                    if col_talvez.button("🤔 Talvez", key=f"talvez_{id_banco}"):
-                        _registrar_decisao_manual(id_banco, "Talvez", candidato_original)
-                    if col_rep.button("❌ Reprovar", key=f"reprovar_{id_banco}"):
-                        _registrar_decisao_manual(id_banco, "Reprovado", candidato_original)
-                else:
-                    st.caption("Decisão manual disponível após a análise ser salva no histórico.")
+        with colA:
+            st.markdown(f"**Resumo:** {linha['Resumo']}")
+            st.markdown(f"**Email:** {linha['Email']} | **Telefone:** {linha['Telefone']}")
+            st.markdown(f"**LinkedIn:** {linha['LinkedIn']}")
+
+        with colB:
+            candidato_original = next(
+                (r for r in st.session_state.resultados if r.get("hash_arquivo") == linha["Hash"]),
+                None
+            )
+
+            bytes_download = candidato_original.get("_bytes_download") if candidato_original else None
+
+            if bytes_download:
+                st.download_button(
+                    "📎 Abrir currículo",
+                    data=bytes_download,
+                    file_name=linha["Arquivo"],
+                    key=f"download_{linha['Arquivo']}_{linha['Ranking']}",
+                )
+            else:
+                st.caption("📎 Arquivo disponível apenas na sessão em que foi enviado.")
+
+            id_banco = candidato_original.get("_id_banco") if candidato_original else None
+
+            if id_banco:
+                col_ap, col_talvez, col_rep = st.columns(3)
+
+                if col_ap.button("✅ Aprovar", key=f"aprovar_{id_banco}"):
+                    _registrar_decisao_manual(id_banco, "Aprovado", candidato_original)
+
+                if col_talvez.button("🤔 Talvez", key=f"talvez_{id_banco}"):
+                    _registrar_decisao_manual(id_banco, "Talvez", candidato_original)
+
+                if col_rep.button("❌ Reprovar", key=f"reprovar_{id_banco}"):
+                    _registrar_decisao_manual(id_banco, "Reprovado", candidato_original)
+            else:
+                st.caption("Decisão manual disponível após a análise ser salva no histórico.")
 
     secao_exportacao(df_filtrado[colunas_exibicao])
 
