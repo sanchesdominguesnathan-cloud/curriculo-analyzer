@@ -642,9 +642,10 @@ def secao_resultados(df_filtrado: pd.DataFrame):
                 st.markdown(f"**Email:** {linha['Email']} | **Telefone:** {linha['Telefone']}")
                 st.markdown(f"**LinkedIn:** {linha['LinkedIn']}")
             with colB:
-                candidato_original = next(
-                    (r for r in st.session_state.resultados if r.get("arquivo") == linha["Arquivo"]), None
-                )
+           candidato_original = next(
+    (r for r in st.session_state.resultados if r.get("hash_arquivo") == linha["Hash"]),
+    None
+)
                 # Correção #4: bytes para download ficam em _bytes_download,
                 # não em conteudo_bytes. Candidatos recuperados do banco
                 # (sem _bytes_download) não exibem o botão de download.
