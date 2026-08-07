@@ -601,32 +601,55 @@ def _registrar_decisao_manual(id_banco: int, decisao: str, candidato_original: d
     st.success(f"Decisão '{decisao}' registrada — a tabela e o dashboard já foram atualizados.")
     st.rerun()
 
-
 def secao_resultados(df_filtrado: pd.DataFrame):
     st.header("5. Resultados")
+
     if df_filtrado.empty:
         st.info("Nenhum resultado para exibir com os filtros atuais.")
         return
 
-    tem_alerta_cidade = "Alerta" in df_filtrado.columns and (df_filtrado["Alerta"] != "").any()
+    tem_alerta_cidade = (
+        "Alerta" in df_filtrado.columns
+        and (df_filtrado["Alerta"] != "").any()
+    )
+
     if tem_alerta_cidade:
         qtd_alertas = int((df_filtrado["Alerta"] != "").sum())
         st.warning(
-            f"⚠️ {qtd_alertas} candidato(s) fora da cidade da vaga (ou sem cidade identificada). "
-            "Veja a coluna 'Alerta' na tabela abaixo."
+            f"⚠️ {qtd_alertas} candidato(s) fora da cidade da vaga "
+            "(ou sem cidade identificada). Veja a coluna 'Alerta' na tabela abaixo."
         )
 
     colunas_exibicao = [
-        "Ranking", "Nome", "Pontuação", "Compatibilidade (%)", "Experiência",
-        "Formação", "Idiomas", "Cidade", "Alerta", "Status"
+        "Ranking",
+        "Nome",
+        "Pontuação",
+        "Compatibilidade (%)",
+        "Experiência",
+        "Formação",
+        "Idiomas",
+        "Cidade",
+        "Alerta",
+        "Status",
     ]
-    colunas_exibicao = [c for c in colunas_exibicao if c in df_filtrado.columns]
+
+    colunas_exibicao = [
+        c for c in colunas_exibicao if c in df_filtrado.columns
+    ]
+
     df_exibicao = df_filtrado[colunas_exibicao].copy()
     df_exibicao["Status"] = df_exibicao["Status"].apply(texto_status_com_icone)
 
     st.dataframe(
         df_exibicao.style.apply(
-            lambda linha: [cor_status(linha["Status"].replace("✅ ", "").replace("⚠️ ", "").replace("❌ ", ""))] * len(linha),
+            lambda linha: [
+                cor_status(
+                    linha["Status"]
+                    .replace("✅ ", "")
+                    .replace("⚠️ ", "")
+                    .replace("❌ ", "")
+                )
+            ] * len(linha),
             axis=1,
         ),
         use_container_width=True,
@@ -634,51 +657,96 @@ def secao_resultados(df_filtrado: pd.DataFrame):
     )
 
     st.subheader("Detalhes e decisão por candidato")
-  for _, linha in df_filtrado.iterrows():
-    with st.expander(f"#{linha['Ranking']} — {linha['Nome']} ({linha['Status']}, {linha['Pontuação']} pts)"):
-        colA, colB = st.columns([2, 1])
 
-        with colA:
-            st.markdown(f"**Resumo:** {linha['Resumo']}")
-            st.markdown(f"**Email:** {linha['Email']} | **Telefone:** {linha['Telefone']}")
-            st.markdown(f"**LinkedIn:** {linha['LinkedIn']}")
+    for _, linha in df_filtrado.iterrows():
+        with st.expander(
+            f"#{linha['Ranking']} — {linha['Nome']} "
+            f"({linha['Status']}, {linha['Pontuação']} pts)"
+        ):
+            colA, colB = st.columns([2, 1])
 
-        with colB:
-            candidato_original = next(
-                (r for r in st.session_state.resultados if r.get("hash_arquivo") == linha["Hash"]),
-                None
-            )
-
-            bytes_download = candidato_original.get("_bytes_download") if candidato_original else None
-
-            if bytes_download:
-                st.download_button(
-                    "📎 Abrir currículo",
-                    data=bytes_download,
-                    file_name=linha["Arquivo"],
-                    key=f"download_{linha['Arquivo']}_{linha['Ranking']}",
+            with colA:
+                st.markdown(f"**Resumo:** {linha['Resumo']}")
+                st.markdown(
+                    f"**Email:** {linha['Email']} | "
+                    f"**Telefone:** {linha['Telefone']}"
                 )
-            else:
-                st.caption("📎 Arquivo disponível apenas na sessão em que foi enviado.")
+                st.markdown(f"**LinkedIn:** {linha['LinkedIn']}")
 
-            id_banco = candidato_original.get("_id_banco") if candidato_original else None
+            with colB:
+                candidato_original = next(
+                    (
+                        r
+                        for r in st.session_state.resultados
+                        if r.get("hash_arquivo") == linha["Hash"]
+                    ),
+                    None,
+                )
 
-            if id_banco:
-                col_ap, col_talvez, col_rep = st.columns(3)
+                bytes_download = (
+                    candidato_original.get("_bytes_download")
+                    if candidato_original
+                    else None
+                )
 
-                if col_ap.button("✅ Aprovar", key=f"aprovar_{id_banco}"):
-                    _registrar_decisao_manual(id_banco, "Aprovado", candidato_original)
+                if bytes_download:
+                    st.download_button(
+                        "📎 Abrir currículo",
+                        data=bytes_download,
+                        file_name=linha["Arquivo"],
+                        key=f"download_{linha['Arquivo']}_{linha['Ranking']}",
+                    )
+                else:
+                    st.caption(
+                        "📎 Arquivo disponível apenas na sessão "
+                        "em que foi enviado."
+                    )
 
-                if col_talvez.button("🤔 Talvez", key=f"talvez_{id_banco}"):
-                    _registrar_decisao_manual(id_banco, "Talvez", candidato_original)
+                id_banco = (
+                    candidato_original.get("_id_banco")
+                    if candidato_original
+                    else None
+                )
 
-                if col_rep.button("❌ Reprovar", key=f"reprovar_{id_banco}"):
-                    _registrar_decisao_manual(id_banco, "Reprovado", candidato_original)
-            else:
-                st.caption("Decisão manual disponível após a análise ser salva no histórico.")
+                if id_banco:
+                    col_ap, col_talvez, col_rep = st.columns(3)
+
+                    if col_ap.button(
+                        "✅ Aprovar",
+                        key=f"aprovar_{id_banco}",
+                    ):
+                        _registrar_decisao_manual(
+                            id_banco,
+                            "Aprovado",
+                            candidato_original,
+                        )
+
+                    if col_talvez.button(
+                        "🤔 Talvez",
+                        key=f"talvez_{id_banco}",
+                    ):
+                        _registrar_decisao_manual(
+                            id_banco,
+                            "Talvez",
+                            candidato_original,
+                        )
+
+                    if col_rep.button(
+                        "❌ Reprovar",
+                        key=f"reprovar_{id_banco}",
+                    ):
+                        _registrar_decisao_manual(
+                            id_banco,
+                            "Reprovado",
+                            candidato_original,
+                        )
+                else:
+                    st.caption(
+                        "Decisão manual disponível após a análise "
+                        "ser salva no histórico."
+                    )
 
     secao_exportacao(df_filtrado[colunas_exibicao])
-
 
 def secao_exportacao(df: pd.DataFrame):
     st.subheader("6. Exportação")
