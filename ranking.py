@@ -44,7 +44,7 @@ def montar_tabela_resultados(lista_candidatos: list, cidade_vaga: str = "") -> p
         # a competência textualmente.
         competencias_txt = ", ".join(c.get("competencias_encontradas", []))
 
-        linhas.append({
+     linhas.append({
             "Nome": c.get("nome", "Não identificado"),
             "Pontuação": c.get("score_final", 0),
             "Compatibilidade (%)": c.get("compatibilidade_percentual", 0),
@@ -62,6 +62,7 @@ def montar_tabela_resultados(lista_candidatos: list, cidade_vaga: str = "") -> p
             "Resumo": c.get("resumo", ""),
             "Competências": competencias_txt,
             "Arquivo": c.get("arquivo", ""),
+            "Hash": c.get("hash_arquivo", ""),   # <-- NOVO: identificador único de verdade
         })
 
     df = pd.DataFrame(linhas)
