@@ -38,6 +38,7 @@ from parser import (
     extrair_idiomas,
     extrair_competencias,
     calcular_experiencia_total,
+    extrair_cargos,
     extrair_linkedin,
     extrair_email,
     extrair_telefone,
@@ -52,14 +53,15 @@ from keywords import listar_todas_palavras_chave_sugeridas, montar_lista_palavra
 # ---------------------------------------------------------------------------
 # Cada empresa cliente tem seu próprio Google Form (e portanto sua própria
 # planilha de respostas) — isso garante isolamento entre empresas mesmo que
-# um recrutador erre algum campo do formulário. Atualize esse dicionário
-# manualmente sempre que criar um Form novo pra uma empresa nova.
+# um recrutador erre algum campo do formulário.
+#
+# O ID da planilha fica na coluna `empresas.forms_sheet_id` do banco (antes
+# era um dicionário fixo aqui, o que exigia alterar o código e fazer deploy a
+# cada cliente novo, e deixava os IDs no repositório). Para configurar:
+#     UPDATE empresas SET forms_sheet_id = '<id>' WHERE id = <empresa_id>;
+# ou, em Python:  database.definir_sheet_id_forms(empresa_id, "<id>")
 #
 # Como pegar o sheet_id: é o trecho da URL entre "/d/" e "/edit".
-SHEET_IDS_POR_EMPRESA = {
-    1: "11PTdjVSPDFwseWn1_Pdck1f9eZSma01bGBxzqZ4mcOc", #Teste da entrada do forms
-    4: "1us94IgHDSjmZsFMHBGZw-rfZDMf_4z1IEi7BN9kcLEU", #Gabriela 
-}
 
 
 ESCOPOS = [
@@ -190,6 +192,7 @@ def _montar_dados_candidato(linha_normalizada: dict, vaga: dict):
         "evidencias_competencias": evidencias,
         "experiencia_meses": total_meses,
         "experiencia_formatada": experiencia_formatada,
+        "cargos": extrair_cargos(texto),
         "_texto_bruto_temp": texto,
         "_origem": "google_forms",
     }

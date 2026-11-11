@@ -119,3 +119,56 @@ def test_forms_nao_duplica_quando_email_e_corrigido(cenario, monkeypatch):
     linha["E-mail do candidato"] = "ana.lima@x.com"   # recrutadora corrigiu o e-mail
     assert F.importar_candidaturas_forms(e1, "x")["importados"] == 0
     assert len(db.listar_curriculos_por_vaga(e1, cenario["vA"])) == 1
+
+
+def test_login_bloqueia_apos_5_falhas_e_libera_com_sucesso(cenario):
+    # 4 falhas: ainda deixa tentar; a 5ª bloqueia (mesmo com a senha certa depois)
+    for i in range(4):
+        empresa, espera, restantes = db.tentar_login("e1@x.com", "errada")
+        assert empresa is None and espera == 0 and restantes == 4 - i
+    empresa, espera, restantes = db.tentar_login("e1@x.com", "errada")
+    assert empresa is None and espera > 0 and restantes == 0
+    empresa, espera, _ = db.tentar_login("e1@x.com", "Senha123!")
+    assert empresa is None and espera > 0          # bloqueado: nem confere a senha
+
+
+def test_login_certo_zera_as_falhas(cenario):
+    for _ in range(3):
+        db.tentar_login("e1@x.com", "errada")
+    empresa, espera, _ = db.tentar_login("E1@X.com ", "Senha123!")  # e-mail com caixa/espaço
+    assert empresa and empresa["id"] == cenario["e1"] and espera == 0
+    assert db.segundos_de_bloqueio("e1@x.com") == 0
+    # depois do sucesso o contador recomeça do zero
+    assert db.tentar_login("e1@x.com", "errada")[2] == 4
+
+
+def test_login_bloqueio_e_por_email(cenario):
+    for _ in range(5):
+        db.tentar_login("e1@x.com", "errada")
+    empresa, espera, _ = db.tentar_login("e2@x.com", "Senha123!")  # outra conta não é afetada
+    assert empresa and espera == 0
+
+
+def test_conta_inexistente_tambem_conta_falhas(cenario):
+    for _ in range(5):
+        db.tentar_login("naoexiste@x.com", "qualquer")
+    assert db.segundos_de_bloqueio("naoexiste@x.com") > 0
+
+
+def test_bloqueio_expira_com_o_tempo(cenario):
+    for _ in range(5):
+        db.registrar_falha("x@x.com")
+    assert db.segundos_de_bloqueio("x@x.com") > 0
+    with db.conectar() as c:  # envelhece as falhas em 16 min
+        cur = c.cursor()
+        cur.execute("UPDATE tentativas_falhas SET data = NOW() - INTERVAL '16 minutes' WHERE chave='x@x.com'")
+    assert db.segundos_de_bloqueio("x@x.com") == 0
+
+
+def test_sheet_id_do_forms_por_empresa(cenario):
+    e1, e2 = cenario["e1"], cenario["e2"]
+    assert db.obter_sheet_id_forms(e1) is None
+    db.definir_sheet_id_forms(e1, "  abc123  ")
+    assert db.obter_sheet_id_forms(e1) == "abc123" and db.obter_sheet_id_forms(e2) is None
+    db.definir_sheet_id_forms(e1, "")
+    assert db.obter_sheet_id_forms(e1) is None

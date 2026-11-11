@@ -203,6 +203,10 @@ def gerar_resumo_candidato(dados: dict) -> str:
     else:
         frases.append(f"{sujeito}: experiência profissional não identificada no currículo.")
 
+    cargos = [c for c in (dados.get("cargos") or []) if _informado(c)]
+    if cargos:
+        frases.append(f"Cargos: {', '.join(cargos[:3])}.")
+
     if competencias:
         frases.append(f"Principais competências: {', '.join(competencias[:4])}.")
     else:

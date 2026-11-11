@@ -209,3 +209,62 @@ def test_candidato_sem_dados_de_contato_nao_e_duplicado():
     cands = [{"nome": "Não identificado", "score_final": 1, "hash_arquivo": "a"},
              {"nome": "Não identificado", "score_final": 2, "hash_arquivo": "b"}]
     assert (R.montar_tabela_resultados(cands)["Duplicidade"] == "").all()
+
+
+# -------------------------------- CARGOS -----------------------------------
+
+CV_CARGOS = """Maria Silva
+Experiência Profissional
+Analista Financeiro Sênior - Banco Itaú (01/2019 - 12/2022)
+Auxiliei o analista de contas na rotina de fechamento.
+Responsável pelo atendimento ao cliente e conciliação bancária.
+ASSISTENTE ADMINISTRATIVO | Empresa XYZ | 2016 - 2018
+Caixa Econômica Federal, Atendente, 2014-2016
+Jovem Aprendiz - Loja ABC (2012 - 2014)
+Formação
+Técnico em Administração 2010 - 2012
+"""
+
+
+def test_extrai_cargos_e_ignora_frases_e_empresas():
+    assert P.extrair_cargos(CV_CARGOS) == [
+        "Analista Financeiro Sênior", "Assistente Administrativo", "Atendente", "Jovem Aprendiz",
+    ]
+
+
+def test_sem_cargos_devolve_lista_vazia():
+    assert P.extrair_cargos("Texto livre sem nenhuma experiência listada.") == []
+
+
+def test_filtro_de_cargo_acha_pelo_cargo_exercido():
+    cands = [
+        {"nome": "Maria", "score_final": 80, "hash_arquivo": "a", "cargos": ["Analista Financeiro Sênior"]},
+        {"nome": "João", "score_final": 70, "hash_arquivo": "b", "cargos": ["Vendedor"]},
+    ]
+    df = R.montar_tabela_resultados(cands)
+    assert list(R.aplicar_filtros(df, cargo="analista financeiro")["Nome"]) == ["Maria"]
+
+
+def test_resumo_inclui_cargos():
+    r = U.gerar_resumo_candidato({"nome": "Ana", "experiencia_formatada": "2 anos", "cargos": ["Analista", "Assistente"]})
+    assert "Cargos: Analista, Assistente." in r
+
+
+# -------------------------------- IDIOMAS ----------------------------------
+
+@pytest.mark.parametrize("texto, esperado", [
+    ("Experiência\nAtendimento a clientes ingleses e inglês técnico no dia a dia.\n", {}),
+    ("Currículo em português. Analista.", {}),
+    ("Perfil\nTenho inglês avançado e espanhol básico.\n", {"Inglês": "Avançado", "Espanhol": "Básico"}),
+    ("Fluente em inglês, vivência no exterior.", {"Inglês": "Fluente"}),
+    ("Idiomas\nInglês - Avançado\nEspanhol - Básico\nFormação\nGraduação em Direito\n",
+     {"Inglês": "Avançado", "Espanhol": "Básico"}),
+    ("Idiomas\nInglês\nFrancês\n", {"Inglês": "Não especificado", "Francês": "Não especificado"}),
+    ("Idiomas: Inglês fluente, Espanhol intermediário", {"Inglês": "Fluente", "Espanhol": "Intermediário"}),
+    ("Idiomas\nInglês\nAvançado\nEspanhol\nBásico\n", {"Inglês": "Avançado", "Espanhol": "Básico"}),
+    ("Idiomas\nInglês, Espanhol básico\n", {"Inglês": "Não especificado", "Espanhol": "Básico"}),
+    # citar o idioma DEPOIS de encerrada a seção não acrescenta idioma
+    ("Idiomas\nInglês avançado\nExperiência\nTrabalhei com inglês e francês.\n", {"Inglês": "Avançado"}),
+])
+def test_extrair_idiomas(texto, esperado):
+    assert P.extrair_idiomas(texto) == esperado

@@ -56,20 +56,29 @@ Os sintomas vinham de **quatro causas diferentes**, em camadas:
 | 3.13 | MÉDIA | Fuzzy match em palavras curtas ("sap", "bi") casava com qualquer palavra parecida |
 | 3.14 | BAIXA | Faltava `.gitignore` (`__pycache__` e segredos locais podiam ser versionados) |
 
-## 4. Pontos que NÃO alterei (decisão sua)
+## 4. Pontos que ficaram em aberto na primeira entrega (segunda rodada)
 
-1. **Filtro "Cargo/competência"**: o cargo exercido pelo candidato não é extraído do currículo, então o filtro só acha o que já está no nome, resumo ou competências. Ou extrair cargos, ou renomear o filtro.
-2. **Limite de tentativas de login** (`tentativas_login`) vive só no `session_state`: abrir outra aba zera. Para bloquear força bruta de verdade, registre tentativas por e-mail/IP no banco.
-3. **LGPD**: o sistema guarda nome, e-mail, telefone e cidade sem política de retenção, consentimento ou rotina de exclusão. Vale definir prazo e um botão "excluir candidato".
-4. **Arquivos `data` e `uploads` na raiz do repositório são arquivos vazios**, não pastas. Provavelmente acidente; remover.
-5. **Excluir vaga**: a mensagem diz que os currículos "continuam no histórico geral", mas não existe tela de histórico; eles ficam sem vaga e invisíveis.
-6. **Idiomas**: citar "Inglês" em qualquer lugar do texto já dá 40 pontos ("Não especificado"). Considerar exigir a seção de idiomas.
-7. `SHEET_IDS_POR_EMPRESA` está fixo no código. Mover para o banco ou variável de ambiente.
-8. Nome só com letras espaçadas ("B R U N O ...") sem nome de arquivo aproveitável sai como uma palavra só (limitação do PDF, sem solução segura).
+| # | Situação | O que foi feito |
+|---|---|---|
+| 1 | Resolvido | **Filtro de cargo**: o parser agora extrai os cargos da seção de experiência (`extrair_cargos`), guarda em `dados["cargos"]`, mostra na tela de detalhes, inclui no resumo ("Cargos: ...") e o filtro busca neles. Currículos antigos só ganham cargos quando reenviados |
+| 2 | Resolvido | **Limite de login no banco** (tabela `tentativas_falhas`): 5 falhas por e-mail em 15 minutos bloqueiam, inclusive para a senha certa. Conta inexistente também conta (não revela e-mails cadastrados). O **código de cadastro** ganhou o mesmo limite e comparação em tempo constante. Contrapartida: errar a senha de outra pessoa 5 vezes bloqueia o e-mail dela por 15 min |
+| 3 | Fora do código | **LGPD**: tratada no contrato, por decisão sua |
+| 4 | Resolvido | Arquivos vazios `data` e `uploads` removidos |
+| 5 | Resolvido | **Excluir vaga** agora pede confirmação ("Os N candidatos deixam de aparecer... não pode ser desfeita") e a mensagem final é verdadeira. Antes a mensagem era errada e ainda sumia antes de aparecer (o `st.rerun()` vinha logo depois) |
+| 6 | Resolvido | **Idiomas**: dentro da seção "Idiomas" basta citar; fora dela só conta com o nível colado ao nome ("Inglês avançado", "Fluente em inglês"). Citar "inglês" no meio de uma frase não dá mais idioma |
+| 7 | Resolvido | **IDs das planilhas do Forms** saíram do código e foram para a coluna `empresas.forms_sheet_id` (**veja o passo manual na seção 5**) |
+| 8 | Sem solução | Nome com letras espaçadas sem nome de arquivo aproveitável: limitação do PDF |
 
 ## 5. Como aplicar
 
-1. Faça **backup do banco** (a migração remove a restrição antiga e cria o índice novo no primeiro start; é idempotente, não apaga dados).
-2. Aplique o patch (`git apply curriculo-analyzer-correcoes.patch`) ou copie os arquivos.
-3. Rode `pytest tests/` (os de banco exigem `AMBIENTE=teste` e uma `DATABASE_URL` de **teste**, nunca a de produção).
-4. **Reenvie os currículos** das vagas afetadas: a reanálise agora refaz nome, experiência e resumo (a decisão manual é mantida). Candidatos do Forms usam o nome digitado no formulário.
+1. Faça **backup do banco**. No primeiro start a migração remove a restrição antiga de `curriculos`, cria o índice novo e as estruturas novas (tabela `tentativas_falhas`, coluna `forms_sheet_id`). É idempotente e não apaga dados.
+2. Aplique o código (merge do Pull Request).
+3. **Passo manual (Forms):** as planilhas deixaram de ser fixas no código. Sem este passo, o botão "Importar candidaturas" some para as empresas 1 e 4. Rode no banco:
+
+```sql
+UPDATE empresas SET forms_sheet_id = '11PTdjVSPDFwseWn1_Pdck1f9eZSma01bGBxzqZ4mcOc' WHERE id = 1;
+UPDATE empresas SET forms_sheet_id = '1us94IgHDSjmZsFMHBGZw-rfZDMf_4z1IEi7BN9kcLEU' WHERE id = 4;
+```
+
+4. Rode `pytest tests/` (os de banco exigem `AMBIENTE=teste` e uma `DATABASE_URL` de **teste**, nunca a de produção).
+5. **Reenvie os currículos** das vagas afetadas: a reanálise refaz nome, experiência, cargos, idiomas e resumo (a decisão manual é mantida). Candidatos do Forms usam o nome digitado no formulário.

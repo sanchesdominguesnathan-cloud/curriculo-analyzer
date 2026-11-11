@@ -8,6 +8,7 @@ Execução local:
 
 import io
 import os
+import secrets
 
 import streamlit as st
 import pandas as pd
@@ -101,36 +102,26 @@ def tela_login():
     aba_login, aba_cadastro = st.tabs([" Entrar", "🆕 Criar conta"])
 
     with aba_login:
-        # Correção #11: bloqueia após 5 tentativas consecutivas falhas.
-        MAX_TENTATIVAS = 5
-        if st.session_state.tentativas_login >= MAX_TENTATIVAS:
-            st.error(
-                f"⛔ Muitas tentativas de login ({MAX_TENTATIVAS}). "
-                "Recarregue a página para tentar novamente."
-            )
-            if st.button("🔄 Recarregar"):
-                st.session_state.tentativas_login = 0
-                st.rerun()
-            return False
-
+        # Limite de tentativas guardado no BANCO, por e-mail (antes ficava no
+        # session_state e zerava ao abrir outra aba ou recarregar a página).
         with st.form("form_login"):
             email = st.text_input("E-mail")
             senha = st.text_input("Senha", type="password")
             enviar = st.form_submit_button("Entrar", type="primary")
 
         if enviar:
-            empresa = db.autenticar_empresa(email, senha)
+            empresa, espera, restantes = db.tentar_login(email, senha)
             if empresa:
                 st.session_state.empresa_logada = empresa
                 st.session_state.tentativas_login = 0
                 st.rerun()
+            elif espera > 0:
+                st.error(
+                    f"⛔ Muitas tentativas de login. Tente novamente em "
+                    f"{max(1, round(espera / 60))} minuto(s)."
+                )
             else:
-                st.session_state.tentativas_login += 1
-                restantes = MAX_TENTATIVAS - st.session_state.tentativas_login
-                if restantes > 0:
-                    st.error(f"E-mail ou senha incorretos. {restantes} tentativa(s) restante(s).")
-                else:
-                    st.error("Conta bloqueada temporariamente. Recarregue a página.")
+                st.error(f"E-mail ou senha incorretos. {restantes} tentativa(s) restante(s).")
 
     with aba_cadastro:
         codigo_esperado = _obter_codigo_cadastro()
@@ -145,7 +136,16 @@ def tela_login():
             criar = st.form_submit_button("Criar conta")
 
         if criar:
-            if codigo_esperado and codigo_digitado != codigo_esperado:
+            espera_cadastro = db.segundos_de_bloqueio("__cadastro__") if codigo_esperado else 0
+            if espera_cadastro > 0:
+                st.error(
+                    f"⛔ Muitas tentativas com código inválido. Tente novamente em "
+                    f"{max(1, round(espera_cadastro / 60))} minuto(s)."
+                )
+            elif codigo_esperado and not secrets.compare_digest(
+                (codigo_digitado or "").encode("utf-8"), str(codigo_esperado).encode("utf-8")
+            ):
+                db.registrar_falha("__cadastro__")
                 st.error("Código de acesso inválido.")
             elif not nome_empresa.strip() or not email_cadastro.strip():
                 st.error("Preencha o nome da empresa e o e-mail.")
@@ -167,6 +167,10 @@ def tela_login():
 
 def secao_vaga(empresa_id: int):
     st.header(" Pasta da Vaga")
+
+    aviso_exclusao = st.session_state.pop("aviso_vaga_excluida", None)
+    if aviso_exclusao:
+        st.success(aviso_exclusao)
 
     vagas_salvas = db.listar_vagas(empresa_id)
     nomes_vagas = [v["nome"] for v in vagas_salvas]
@@ -202,12 +206,32 @@ def secao_vaga(empresa_id: int):
             st.write("")
             st.write("")
             if st.button("🗑️ Excluir vaga", key="excluir_vaga_btn"):
+                st.session_state.confirmar_exclusao_vaga = vaga_ativa["id"]
+                st.rerun()
+
+        # Confirmação em dois passos: excluir uma vaga faz os candidatos dela
+        # deixarem de aparecer (não existe tela de "histórico geral"), então
+        # a mensagem não pode prometer o contrário nem acontecer num clique só.
+        if st.session_state.get("confirmar_exclusao_vaga") == vaga_ativa["id"]:
+            qtd = len(db.listar_curriculos_por_vaga(empresa_id, vaga_ativa["id"]))
+            st.warning(
+                f"Excluir a vaga '{escolha}'? Os {qtd} candidato(s) analisados nela "
+                "deixam de aparecer no sistema. Essa ação não pode ser desfeita."
+            )
+            col_sim, col_nao, _ = st.columns([1, 1, 4])
+            if col_sim.button("Sim, excluir", key="confirma_excluir_vaga", type="primary"):
                 db.excluir_vaga(empresa_id, vaga_ativa["id"])
                 st.session_state.vaga_id_ativa = None
                 st.session_state.ultima_vaga_carregada = None
                 st.session_state.resultados = []
                 st.session_state.df_resultados = pd.DataFrame()
-                st.success(f"Vaga '{escolha}' excluída. Os currículos continuam salvos no histórico geral.")
+                st.session_state.confirmar_exclusao_vaga = None
+                st.session_state.aviso_vaga_excluida = (
+                    f"Vaga '{escolha}' excluída. Os candidatos dela deixaram de aparecer no sistema."
+                )
+                st.rerun()
+            if col_nao.button("Cancelar", key="cancela_excluir_vaga"):
+                st.session_state.confirmar_exclusao_vaga = None
                 st.rerun()
 
     if st.session_state.ultima_vaga_carregada != chave_vaga_atual:
@@ -240,7 +264,7 @@ def secao_vaga(empresa_id: int):
     return vaga_ativa
 
 def secao_importar_forms(empresa_id: int):
-    sheet_id = forms_import.SHEET_IDS_POR_EMPRESA.get(empresa_id)
+    sheet_id = db.obter_sheet_id_forms(empresa_id)
     if not sheet_id:
         return  # essa empresa ainda não tem um Forms configurado
 
@@ -688,6 +712,8 @@ def secao_resultados(df_filtrado: pd.DataFrame):
 
             with colA:
                 st.markdown(f"**Resumo:** {linha['Resumo']}")
+                if linha.get("Cargos"):
+                    st.markdown(f"**Cargos:** {linha['Cargos']}")
                 st.markdown(
                     f"**Email:** {linha['Email']} | "
                     f"**Telefone:** {linha['Telefone']}"

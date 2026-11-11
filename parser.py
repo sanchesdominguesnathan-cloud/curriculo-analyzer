@@ -586,32 +586,105 @@ def extrair_formacao(texto: str):
     return nivel, area
 
 
-def extrair_idiomas(texto: str):
-    texto_norm = normalizar_texto(texto)
-    idiomas_encontrados = {}
-    janela_maxima = 25
+_NIVEIS_IDIOMA_TODOS = {
+    **NIVEIS_IDIOMA,
+    "basic": "Básico", "intermediate": "Intermediário", "advanced": "Avançado",
+    "fluent": "Fluente", "native": "Nativo",
+}
+_TITULO_IDIOMAS = re.compile(
+    r"^(?:conhecimentos?\s+de\s+)?(?:idiomas?|linguas?|languages?)(?:\s+[a-z]+){0,2}$"
+)
+_IDIOMAS_NA_MESMA_LINHA = re.compile(r"^\W*(?:idiomas?|linguas?|languages?)\s*[:\-–]\s*(.+)$")
+_SEPARADOR_IDIOMAS = re.compile(r"[,;/|•·]")
 
-    for chave_idioma, nome_idioma in IDIOMAS_CONHECIDOS.items():
-        ocorrencias = list(_regex_palavra_inteira(chave_idioma).finditer(texto_norm))
-        if not ocorrencias:
+
+def _linhas_secao_idiomas(texto: str):
+    """Linhas (normalizadas) da seção de idiomas, ou None se não houver.
+    Reconhece o título sozinho ('Idiomas') e 'Idiomas: Inglês avançado'."""
+    achou, dentro, linhas = False, False, []
+    for linha in texto.splitlines():
+        norm = normalizar_texto(linha)
+        titulo = normalizar_texto(re.sub(r"^[^\w]+", "", linha)).rstrip(" :.-").strip()
+        if titulo and len(titulo) <= 40 and _TITULO_IDIOMAS.match(titulo):
+            achou = dentro = True
             continue
-        # Usa a primeira ocorrência que venha acompanhada de um nível
-        # (ex.: "Inglês" citado numa experiência e, mais abaixo, "Inglês:
-        # avançado" na seção de idiomas).
-        nivel_encontrado = None
-        for ocorrencia in ocorrencias:
-            trecho = texto_norm[ocorrencia.end(): ocorrencia.end() + janela_maxima]
-            melhor_nivel, melhor_posicao = None, None
-            for chave_nivel, nome_nivel in NIVEIS_IDIOMA.items():
-                posicao = trecho.find(chave_nivel)
-                if posicao != -1 and (melhor_posicao is None or posicao < melhor_posicao):
-                    melhor_posicao = posicao
-                    melhor_nivel = nome_nivel
-            if melhor_nivel:
-                nivel_encontrado = melhor_nivel
-                break
-        idiomas_encontrados[nome_idioma] = nivel_encontrado or "Não especificado"
-    return idiomas_encontrados
+        m = _IDIOMAS_NA_MESMA_LINHA.match(norm)
+        if m:
+            achou = dentro = True
+            linhas.append(m.group(1))
+            continue
+        if dentro:
+            if _tipo_titulo(linha):  # começou outra seção
+                dentro = False
+            elif norm:
+                linhas.append(norm)
+    return linhas if achou else None
+
+
+def _nivel_do_idioma(seg: str, inicio: int, fim: int, depois: int, antes: int):
+    """Nível mais próximo do idioma no trecho: até `depois` caracteres após
+    o nome ('Inglês - Avançado') ou `antes` caracteres antes ('Fluente em inglês')."""
+    melhor, melhor_dist = None, None
+    for chave, nome in _NIVEIS_IDIOMA_TODOS.items():
+        for m in re.finditer(r"(?<![a-z])" + chave, seg):
+            if m.start() >= fim:
+                dist, limite = m.start() - fim, depois
+            elif m.end() <= inicio:
+                dist, limite = inicio - m.end(), antes
+            else:
+                continue
+            if dist <= limite and (melhor_dist is None or dist < melhor_dist):
+                melhor, melhor_dist = nome, dist
+    return melhor
+
+
+def extrair_idiomas(texto: str):
+    """Idiomas do candidato.
+
+    Correção: antes bastava a palavra 'Inglês' aparecer em QUALQUER lugar do
+    texto (ex.: 'atendimento a clientes ingleses', 'curso de inglês' em outro
+    contexto, uma vaga descrita) para o candidato ganhar o idioma — e 40
+    pontos de 'Não especificado'. Agora:
+      - Dentro da seção 'Idiomas': citar o idioma basta (nível, se vier junto).
+      - Fora dela: só conta se o NÍVEL vier colado ao nome ('Inglês avançado',
+        'Fluente em espanhol')."""
+    resultado = {}
+    secao = _linhas_secao_idiomas(texto)
+
+    def _processar(linhas, exige_nivel):
+        pendente = None  # idioma visto sem nível; o nível pode vir no trecho seguinte
+        for linha in linhas:
+            for seg in _SEPARADOR_IDIOMAS.split(linha):
+                achou_idioma = False
+                for chave, nome in IDIOMAS_CONHECIDOS.items():
+                    m = _regex_palavra_inteira(chave).search(seg)
+                    if not m:
+                        continue
+                    achou_idioma = True
+                    nivel = _nivel_do_idioma(
+                        seg, m.start(), m.end(),
+                        depois=25 if not exige_nivel else 15,
+                        antes=8,
+                    )
+                    if nivel:
+                        resultado[nome] = nivel
+                        pendente = None
+                    elif not exige_nivel:
+                        resultado.setdefault(nome, "Não especificado")
+                        pendente = nome
+                if not achou_idioma and pendente and resultado.get(pendente) == "Não especificado":
+                    # idioma e nível em linhas/trechos separados ("Inglês" / "Avançado")
+                    soltos = [n for k, n in _NIVEIS_IDIOMA_TODOS.items() if re.search(r"(?<![a-z])" + k, seg)]
+                    if soltos and len(seg.split()) <= 3:
+                        resultado[pendente] = soltos[0]
+                        pendente = None
+
+    if secao is not None:
+        _processar(secao, exige_nivel=False)
+    _processar([normalizar_texto(l) for l in texto.splitlines() if l.strip()], exige_nivel=True)
+
+    # mantém a ordem canônica dos idiomas
+    return {nome: resultado[nome] for nome in IDIOMAS_CONHECIDOS.values() if nome in resultado}
 
 
 def extrair_competencias(texto: str, palavras_chave: list):
@@ -721,6 +794,68 @@ def calcular_experiencia_total(texto: str):
     return total_meses, formatar_experiencia(total_meses)
 
 
+# ---------------------------------------------------------------------------
+# Cargos exercidos
+# ---------------------------------------------------------------------------
+
+# Palavras (sem acento) que identificam um cargo. "caixa" ficou de fora de
+# propósito: casaria com "Caixa Econômica Federal" (a empresa, não o cargo).
+_PALAVRAS_CARGO = {
+    "analista", "assistente", "auxiliar", "gerente", "coordenador", "coordenadora",
+    "supervisor", "supervisora", "diretor", "diretora", "estagiario", "estagiaria",
+    "consultor", "consultora", "vendedor", "vendedora", "atendente", "operador",
+    "operadora", "tecnico", "tecnica", "desenvolvedor", "desenvolvedora",
+    "engenheiro", "engenheira", "programador", "programadora", "recepcionista",
+    "motorista", "administrador", "administradora", "contador", "contadora",
+    "advogado", "advogada", "secretario", "secretaria", "comprador", "compradora",
+    "representante", "promotor", "promotora", "almoxarife", "encarregado",
+    "encarregada", "lider", "aprendiz", "trainee", "especialista", "executivo",
+    "executiva", "gestor", "gestora", "designer", "professor", "professora",
+    "enfermeiro", "enfermeira", "farmaceutico", "farmaceutica", "balconista",
+    "cozinheiro", "cozinheira", "garcom", "mecanico", "eletricista", "pedreiro",
+    "soldador", "montador", "conferente", "repositor", "faxineiro", "faxineira",
+    "vigilante", "porteiro", "zelador", "freelancer", "autonomo", "proprietario",
+}
+
+_SEPARADOR_SEGMENTOS = re.compile(r"\s+[-–—|]\s+|\s*[|•·;:,()]\s*")
+_MAX_CARGOS = 6
+
+
+def extrair_cargos(texto: str) -> list:
+    """Cargos que o candidato exerceu, lidos da seção de experiência.
+
+    Antes o sistema não guardava cargo nenhum, então o filtro 'Cargo' só
+    achava texto que por acaso estivesse no resumo ou no nome. Heurística:
+    em cada linha da experiência (sem as datas), cada trecho curto separado
+    por ' - ', '|', vírgula ou parênteses é um possível cargo se tiver uma
+    palavra de cargo entre as DUAS primeiras palavras — isso descarta frases
+    como 'Auxiliei o analista de contas', onde a palavra vem no meio."""
+    from utils import PADRAO_PERIODO
+
+    cargos, vistos = [], set()
+    for linha in isolar_secao_experiencia(texto).splitlines():
+        linha = linha.strip(" \t•·●-–—*")
+        if not linha or "@" in linha or len(linha.split()) > 14:
+            continue
+        sem_datas = PADRAO_PERIODO.sub(" ", linha)
+        for trecho in _SEPARADOR_SEGMENTOS.split(sem_datas):
+            trecho = re.sub(r"\s+", " ", trecho).strip(" .-–—")
+            palavras = trecho.split()
+            if not 1 <= len(palavras) <= 6 or trecho.endswith("."):
+                continue
+            primeiras = [normalizar_texto(p) for p in palavras[:2]]
+            if not any(p in _PALAVRAS_CARGO for p in primeiras):
+                continue
+            chave = normalizar_texto(trecho)
+            if chave in vistos:
+                continue
+            vistos.add(chave)
+            cargos.append(_formatar_nome(trecho) if trecho.isupper() else trecho)
+            if len(cargos) >= _MAX_CARGOS:
+                return cargos
+    return cargos
+
+
 def processar_curriculo(nome_arquivo: str, arquivo_bytes: bytes, palavras_chave: list = None) -> dict:
     if palavras_chave is None:
         palavras_chave = listar_todas_palavras_chave_sugeridas()
@@ -752,6 +887,7 @@ def processar_curriculo(nome_arquivo: str, arquivo_bytes: bytes, palavras_chave:
         "evidencias_competencias": evidencias,
         "experiencia_meses": total_meses,
         "experiencia_formatada": experiencia_formatada,
+        "cargos": extrair_cargos(texto),
         "_texto_bruto_temp": texto,
     }
     return dados

@@ -135,6 +135,7 @@ def montar_tabela_resultados(
             "Telefone": c.get("telefone") or "-",
             "LinkedIn": c.get("linkedin") or "-",
             "Resumo": c.get("resumo") or "",
+            "Cargos": ", ".join(c.get("cargos") or []),
             "Competências": competencias_txt,
             "Arquivo": c.get("arquivo") or "",
             "Hash": c.get("hash_arquivo") or "",
@@ -180,9 +181,9 @@ def aplicar_filtros(
     """
     Aplica filtros combináveis sobre a tabela de resultados.
 
-    O filtro de cargo busca em Resumo, Nome e Competências (o cargo exercido
-    pelo candidato não é extraído do currículo, então ele só acha cargos que
-    apareçam nesses campos).
+    O filtro de cargo busca nos Cargos exercidos (extraídos da experiência),
+    além de Resumo, Nome e Competências. Currículos analisados antes desta
+    versão não têm cargos salvos até serem reenviados.
 
     O ranking é reordenado após aplicar os filtros.
     """
@@ -210,7 +211,8 @@ def aplicar_filtros(
 
     if cargo:
         mask = (
-            _contem(resultado["Resumo"], cargo)
+            _contem(resultado["Cargos"], cargo)
+            | _contem(resultado["Resumo"], cargo)
             | _contem(resultado["Nome"], cargo)
             | _contem(resultado["Competências"], cargo)
         )

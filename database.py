@@ -162,6 +162,26 @@ def inicializar_banco():
                 ON curriculos (empresa_id, (COALESCE(vaga_id, 0)), hash_arquivo)
         """)
 
+        # Falhas de login/cadastro, para o limite de tentativas. Fica no banco
+        # (e não no session_state) porque o contador da sessão zerava ao abrir
+        # outra aba ou recarregar a página.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tentativas_falhas (
+                id SERIAL PRIMARY KEY,
+                chave TEXT NOT NULL,
+                data TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tentativas_falhas_chave
+                ON tentativas_falhas(chave, data)
+        """)
+
+        # Planilha do Google Forms de cada empresa (antes fixa no código).
+        cur.execute("""
+            ALTER TABLE empresas ADD COLUMN IF NOT EXISTS forms_sheet_id TEXT
+        """)
+
         # Correção #18: índices para as queries de busca mais frequentes.
         # Sem eles, cada consulta faz seq scan na tabela inteira.
         cur.execute("""
@@ -213,6 +233,96 @@ def autenticar_empresa(email: str, senha: str):
         if auth.verificar_senha(senha, linha["senha_hash"], linha["senha_salt"]):
             return {"id": linha["id"], "nome": linha["nome"], "email": linha["email"]}
         return None
+
+
+MAX_FALHAS = 5
+JANELA_BLOQUEIO_MIN = 15
+
+
+def segundos_de_bloqueio(chave: str, max_falhas: int = MAX_FALHAS, janela_min: int = JANELA_BLOQUEIO_MIN) -> int:
+    """Segundos até a chave (e-mail ou '__cadastro__') poder tentar de novo.
+    0 se não estiver bloqueada. Bloqueia ao atingir `max_falhas` falhas
+    dentro da janela; libera quando a falha mais antiga sai da janela."""
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT COUNT(*) AS n,
+                   EXTRACT(EPOCH FROM (MIN(data) + make_interval(mins => %s) - NOW())) AS espera
+            FROM tentativas_falhas
+            WHERE chave = %s AND data > NOW() - make_interval(mins => %s)
+        """, (janela_min, chave, janela_min))
+        linha = cur.fetchone()
+        cur.close()
+    if linha["n"] >= max_falhas and linha["espera"] is not None:
+        return max(1, int(linha["espera"]))
+    return 0
+
+
+def registrar_falha(chave: str):
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO tentativas_falhas (chave) VALUES (%s)", (chave,))
+        # limpeza: falhas com mais de 1 dia não servem para nada
+        cur.execute("DELETE FROM tentativas_falhas WHERE data < NOW() - INTERVAL '1 day'")
+        cur.close()
+
+
+def limpar_falhas(chave: str):
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM tentativas_falhas WHERE chave = %s", (chave,))
+        cur.close()
+
+
+def tentar_login(email: str, senha: str):
+    """Login com limite de tentativas por e-mail, guardado no banco.
+
+    Retorna (empresa | None, segundos_de_bloqueio, tentativas_restantes).
+    Enquanto bloqueado, a senha nem é verificada. Conta inexistente também
+    registra falha, para não revelar quais e-mails estão cadastrados.
+    Contrapartida: quem erra a senha 5 vezes para o e-mail de outra pessoa
+    bloqueia esse e-mail por 15 minutos."""
+    chave = (email or "").lower().strip()
+    espera = segundos_de_bloqueio(chave)
+    if espera > 0:
+        return None, espera, 0
+
+    empresa = autenticar_empresa(email, senha)
+    if empresa:
+        limpar_falhas(chave)
+        return empresa, 0, MAX_FALHAS
+
+    registrar_falha(chave)
+    espera = segundos_de_bloqueio(chave)
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM tentativas_falhas WHERE chave = %s "
+            "AND data > NOW() - make_interval(mins => %s)",
+            (chave, JANELA_BLOQUEIO_MIN),
+        )
+        usadas = cur.fetchone()["n"]
+        cur.close()
+    return None, espera, max(0, MAX_FALHAS - usadas)
+
+
+def obter_sheet_id_forms(empresa_id: int):
+    """ID da planilha de respostas do Google Forms da empresa (ou None)."""
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT forms_sheet_id FROM empresas WHERE id = %s", (empresa_id,))
+        linha = cur.fetchone()
+        cur.close()
+    return (linha["forms_sheet_id"] or "").strip() or None if linha else None
+
+
+def definir_sheet_id_forms(empresa_id: int, sheet_id):
+    """Define (ou limpa, com None) a planilha do Forms de uma empresa."""
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE empresas SET forms_sheet_id = %s WHERE id = %s",
+                    ((sheet_id or "").strip() or None, empresa_id))
+        cur.close()
 
 
 def listar_empresas():
@@ -567,6 +677,7 @@ def limpar_banco():
         )
     with conectar() as conn:
         cur = conn.cursor()
+        cur.execute("DELETE FROM tentativas_falhas")
         cur.execute("DELETE FROM decisoes")
         cur.execute("DELETE FROM curriculos")
         cur.execute("DELETE FROM vagas")
