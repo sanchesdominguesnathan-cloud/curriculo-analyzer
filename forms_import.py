@@ -44,7 +44,7 @@ from parser import (
     extrair_cidade,
 )
 from utils import gerar_hash_arquivo, gerar_resumo_candidato, normalizar_texto
-from keywords import listar_todas_palavras_chave_sugeridas
+from keywords import listar_todas_palavras_chave_sugeridas, montar_lista_palavras
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +162,7 @@ def _montar_dados_candidato(linha_normalizada: dict, vaga: dict):
 
     palavras_obrigatorias = vaga.get("obrigatorias", {}) if vaga else {}
     palavras_desejaveis = vaga.get("desejaveis", {}) if vaga else {}
-    todas_palavras = list(set(list(palavras_obrigatorias.keys()) + list(palavras_desejaveis.keys())))
+    todas_palavras = montar_lista_palavras(palavras_obrigatorias, palavras_desejaveis)
     if not todas_palavras:
         todas_palavras = listar_todas_palavras_chave_sugeridas()
 
@@ -227,11 +227,20 @@ def importar_candidaturas_forms(empresa_id: int, sheet_id: str) -> dict:
 
         # Hash de deduplicação: como não existe arquivo físico pra gerar
         # hash de bytes (como no upload normal), usamos o timestamp da
-        # submissão + email como identificador único e estável da linha.
-        chave_dedup = f"{_texto(_valor(linha, COLUNA_TIMESTAMP))}|{dados.get('email', '')}"
+        # submissão + o TEXTO do currículo colado.
+        #
+        # Correção: a chave antiga era timestamp|e-mail. Se a recrutadora
+        # corrigisse o e-mail (ou ele estivesse vazio e depois fosse
+        # preenchido) na planilha, a chave mudava e a linha era importada
+        # de novo — candidato DUPLICADO. O texto do currículo é o campo que
+        # ninguém edita depois, então é a âncora estável. O candidato ainda
+        # pode ser recebido mais de uma vez pelo Forms (reenvio do currículo):
+        # nesse caso a tabela de resultados sinaliza "Possível duplicado".
+        texto_norm = normalizar_texto(_texto(_valor(linha, COLUNA_TEXTO)))
+        chave_dedup = f"{_texto(_valor(linha, COLUNA_TIMESTAMP))}|{texto_norm}"
         hash_arquivo = gerar_hash_arquivo(chave_dedup.encode("utf-8"))
 
-        ja_existe = db.curriculo_ja_analisado(empresa_id, hash_arquivo)
+        ja_existe = db.curriculo_ja_analisado(empresa_id, hash_arquivo, vaga_id)
         if ja_existe:
             continue  # já importado numa sincronização anterior
 

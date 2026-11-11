@@ -119,8 +119,7 @@ def inicializar_banco():
                 status TEXT,
                 data_analise TIMESTAMP NOT NULL DEFAULT NOW(),
                 vaga_descricao TEXT,
-                vaga_id INTEGER REFERENCES vagas(id) ON DELETE SET NULL,
-                UNIQUE (empresa_id, hash_arquivo)
+                vaga_id INTEGER REFERENCES vagas(id) ON DELETE SET NULL
             )
         """)
         cur.execute("""
@@ -142,6 +141,25 @@ def inicializar_banco():
         # que já existem em produção, sem precisar de migração manual.
         cur.execute("""
             ALTER TABLE curriculos ADD COLUMN IF NOT EXISTS decisao_manual TEXT
+        """)
+
+        # Correção (candidatos "pulando"): a unicidade era (empresa_id,
+        # hash_arquivo), ou seja, UMA linha por arquivo na empresa inteira.
+        # Ao analisar o mesmo currículo para uma segunda vaga, o ON CONFLICT
+        # sobrescrevia a linha e MOVIA o candidato para a vaga nova — ele
+        # sumia da primeira, com a nota da segunda. Agora a unicidade é por
+        # (empresa, vaga, arquivo): o mesmo currículo pode concorrer a várias
+        # vagas, uma linha em cada, e dentro de uma vaga nunca duplica.
+        # COALESCE(vaga_id, 0) faz os currículos sem vaga também serem únicos
+        # (NULL é sempre "diferente" de NULL num índice único comum).
+        # Idempotente: seguro de rodar em bancos que já existem em produção.
+        cur.execute("""
+            ALTER TABLE curriculos
+            DROP CONSTRAINT IF EXISTS curriculos_empresa_id_hash_arquivo_key
+        """)
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_curriculos_empresa_vaga_hash
+                ON curriculos (empresa_id, (COALESCE(vaga_id, 0)), hash_arquivo)
         """)
 
         # Correção #18: índices para as queries de busca mais frequentes.
@@ -231,12 +249,15 @@ def _aplicar_decisao_manual(dados: dict, decisao_manual):
     return dados
 
 
-def curriculo_ja_analisado(empresa_id: int, hash_arquivo: str):
+def curriculo_ja_analisado(empresa_id: int, hash_arquivo: str, vaga_id: int = None):
+    """Busca a análise já salva deste arquivo NESTA vaga (o mesmo arquivo
+    pode ter uma análise diferente em cada vaga)."""
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT * FROM curriculos WHERE empresa_id = %s AND hash_arquivo = %s",
-            (empresa_id, hash_arquivo),
+            "SELECT * FROM curriculos WHERE empresa_id = %s AND hash_arquivo = %s "
+            "AND vaga_id IS NOT DISTINCT FROM %s",
+            (empresa_id, hash_arquivo, vaga_id),
         )
         linha = cur.fetchone()
         cur.close()
@@ -301,12 +322,17 @@ def salvar_curriculo(empresa_id: int, hash_arquivo: str, nome_arquivo: str, dado
                 cidade, dados_json, score_final, status, data_analise,
                 vaga_descricao, vaga_id
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (empresa_id, hash_arquivo) DO UPDATE SET
+            ON CONFLICT (empresa_id, (COALESCE(vaga_id, 0)), hash_arquivo) DO UPDATE SET
+                nome_arquivo = EXCLUDED.nome_arquivo,
+                nome_candidato = EXCLUDED.nome_candidato,
+                email = EXCLUDED.email,
+                telefone = EXCLUDED.telefone,
+                cidade = EXCLUDED.cidade,
                 dados_json = EXCLUDED.dados_json,
                 score_final = EXCLUDED.score_final,
                 status = EXCLUDED.status,
                 data_analise = EXCLUDED.data_analise,
-                vaga_id = COALESCE(EXCLUDED.vaga_id, curriculos.vaga_id)
+                vaga_descricao = EXCLUDED.vaga_descricao
             RETURNING id
         """, (
             empresa_id, hash_arquivo, nome_arquivo,
@@ -320,7 +346,10 @@ def salvar_curriculo(empresa_id: int, hash_arquivo: str, nome_arquivo: str, dado
         return id_banco
 
 
-def registrar_decisao(curriculo_id: int, decisao: str):
+DECISOES_VALIDAS = {"Aprovado", "Talvez", "Reprovado"}
+
+
+def registrar_decisao(empresa_id: int, curriculo_id: int, decisao: str):
     """Registra a decisão manual do recrutador sobre um candidato
     (espera-se "Aprovado", "Talvez" ou "Reprovado").
 
@@ -339,15 +368,25 @@ def registrar_decisao(curriculo_id: int, decisao: str):
     mais recente — essa coluna passa a valer como o status "oficial" do
     candidato, sobrepondo o automático, tanto na tabela quanto no
     dashboard, e persistindo entre sessões."""
+    if decisao not in DECISOES_VALIDAS:
+        raise ValueError(f"Decisão inválida: {decisao!r}.")
+
     with conectar() as conn:
         cur = conn.cursor()
+        # Correção (segurança multi-tenant): o UPDATE só vale se o currículo
+        # pertencer à empresa informada. Antes a função recebia só o id, e
+        # qualquer id (sequencial, fácil de adivinhar) alterava o currículo
+        # de OUTRA empresa e ainda contaminava o aprendizado dela.
+        cur.execute(
+            "UPDATE curriculos SET decisao_manual = %s WHERE id = %s AND empresa_id = %s RETURNING id",
+            (decisao, curriculo_id, empresa_id),
+        )
+        if cur.fetchone() is None:
+            cur.close()
+            raise PermissionError("Currículo não encontrado para esta empresa.")
         cur.execute(
             "INSERT INTO decisoes (curriculo_id, decisao, data_decisao) VALUES (%s, %s, %s)",
             (curriculo_id, decisao, datetime.now()),
-        )
-        cur.execute(
-            "UPDATE curriculos SET decisao_manual = %s WHERE id = %s",
-            (decisao, curriculo_id),
         )
         cur.close()
 
@@ -365,9 +404,16 @@ def calcular_ajuste_aprendizado(empresa_id: int, competencias_candidato: list) -
 
     with conectar() as conn:
         cur = conn.cursor()
+        # Só a decisão MAIS RECENTE de cada currículo conta. Antes, cada clique
+        # virava uma linha e um candidato que o recrutador trocou de Aprovado
+        # para Reprovado pesava duas vezes no aprendizado.
         cur.execute("""
             SELECT c.dados_json, d.decisao
-            FROM decisoes d
+            FROM (
+                SELECT DISTINCT ON (curriculo_id) curriculo_id, decisao, data_decisao
+                FROM decisoes
+                ORDER BY curriculo_id, data_decisao DESC, id DESC
+            ) d
             JOIN curriculos c ON c.id = d.curriculo_id
             WHERE c.empresa_id = %s
             ORDER BY d.data_decisao DESC
@@ -408,7 +454,8 @@ def listar_curriculos_por_vaga(empresa_id: int, vaga_id: int):
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT * FROM curriculos WHERE empresa_id = %s AND vaga_id = %s ORDER BY score_final DESC",
+            "SELECT * FROM curriculos WHERE empresa_id = %s AND vaga_id = %s "
+            "ORDER BY score_final DESC NULLS LAST, id",
             (empresa_id, vaga_id),
         )
         resultados = []
@@ -490,6 +537,17 @@ def obter_vaga(empresa_id: int, vaga_id: int):
 def excluir_vaga(empresa_id: int, vaga_id: int):
     with conectar() as conn:
         cur = conn.cursor()
+        # Com a unicidade por (empresa, vaga, arquivo), soltar o currículo da
+        # vaga (vaga_id = NULL) poderia colidir com um que já esteja sem vaga.
+        # Nesse caso o duplicado é removido; os demais ficam sem vaga.
+        cur.execute("""
+            DELETE FROM curriculos c
+            WHERE c.vaga_id = %s AND c.empresa_id = %s
+              AND EXISTS (SELECT 1 FROM curriculos o
+                          WHERE o.empresa_id = c.empresa_id
+                            AND o.hash_arquivo = c.hash_arquivo
+                            AND o.vaga_id IS NULL)
+        """, (vaga_id, empresa_id))
         cur.execute("UPDATE curriculos SET vaga_id = NULL WHERE vaga_id = %s AND empresa_id = %s", (vaga_id, empresa_id))
         cur.execute("DELETE FROM vagas WHERE id = %s AND empresa_id = %s", (vaga_id, empresa_id))
         cur.close()

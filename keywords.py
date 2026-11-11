@@ -12,6 +12,9 @@ O reconhecimento é feito por:
    (ex.: "domínio avançado de planilhas" -> Excel).
 """
 
+import re
+from functools import lru_cache
+
 from rapidfuzz import fuzz
 from utils import normalizar_texto
 
@@ -122,6 +125,26 @@ def obter_variacoes(palavra_chave: str):
     return [chave_norm]
 
 
+@lru_cache(maxsize=1024)
+def _padrao_variacao(variacao: str):
+    """Regex com FRONTEIRA DE PALAVRA para uma variação já normalizada.
+
+    Correção: a busca antiga era por substring pura (`variacao in texto`), o
+    que gerava falsos positivos em massa — "excel" dentro de "excelente",
+    "bi" dentro de "habilidades", "erp" dentro de "interpretação", "py" dentro
+    de "copy", "sap" dentro de "sapato", "word" dentro de "keyword". Como as
+    palavras obrigatórias valem 60% da nota, praticamente todo currículo
+    "tinha" Excel e Power BI. Agora a variação não pode estar colada em
+    letras/números; um plural simples (s/es) é aceito ("planilhas", "vendas").
+    """
+    return re.compile(r"(?<![a-z0-9])" + re.escape(variacao) + r"(?:s|es)?(?![a-z0-9])")
+
+
+# Variações curtas (ex.: "bi", "sap", "py") só valem por correspondência exata;
+# no fuzzy elas casariam com qualquer palavra parecida.
+_TAMANHO_MINIMO_FUZZY = 5
+
+
 def encontrar_ocorrencias(texto_curriculo: str, palavra_chave: str, limiar_fuzzy: int = 87):
     """
     Verifica se uma palavra-chave (ou qualquer de seus sinônimos/variações de
@@ -132,18 +155,25 @@ def encontrar_ocorrencias(texto_curriculo: str, palavra_chave: str, limiar_fuzzy
     texto_norm = normalizar_texto(texto_curriculo)
     variacoes = obter_variacoes(palavra_chave)
 
-    # 1) Correspondência direta (substring) - mais confiável
+    # 1) Correspondência direta, como palavra inteira - mais confiável
     for variacao in variacoes:
-        if variacao in texto_norm:
-            idx = texto_norm.find(variacao)
-            inicio = max(0, idx - 30)
-            fim = min(len(texto_norm), idx + len(variacao) + 30)
-            return True, texto_curriculo[inicio:fim].strip()
+        if not variacao:
+            continue
+        m = _padrao_variacao(variacao).search(texto_norm)
+        if m:
+            # O trecho de evidência sai do texto NORMALIZADO, o mesmo onde o
+            # índice foi calculado (antes o índice vinha do texto normalizado
+            # mas o corte era feito no texto original, desalinhando o trecho).
+            inicio = max(0, m.start() - 30)
+            fim = min(len(texto_norm), m.end() + 30)
+            return True, texto_norm[inicio:fim].strip()
 
     # 2) Correspondência aproximada (fuzzy) palavra a palavra, para pegar
     # pequenas variações ortográficas não previstas na base de sinônimos
     palavras_texto = texto_norm.split()
     for variacao in variacoes:
+        if len(variacao) < _TAMANHO_MINIMO_FUZZY:
+            continue
         n_palavras = len(variacao.split())
         if n_palavras == 1:
             for palavra in palavras_texto:
@@ -163,3 +193,22 @@ def listar_todas_palavras_chave_sugeridas():
     """Retorna a lista de palavras-chave conhecidas na base, para preencher
     sugestões na interface."""
     return list(BASE_SINONIMOS.keys())
+
+
+def montar_lista_palavras(pesos_obrigatorias: dict, pesos_desejaveis: dict) -> list:
+    """Junta obrigatórias + desejáveis numa lista única, SEM repetição e em
+    ordem DETERMINÍSTICA (obrigatórias primeiro, de maior para menor peso).
+
+    Correção: o código antigo usava `list(set(...))`. A ordem de um `set` de
+    strings muda a cada execução do Python (hash randomization), então as
+    "Principais competências" do resumo — que pegam as 4 primeiras — mudavam
+    de ordem entre reinícios do app e entre candidatos reprocessados."""
+    vistos, resultado = set(), []
+    for grupo in (pesos_obrigatorias or {}, pesos_desejaveis or {}):
+        ordenadas = sorted(grupo.items(), key=lambda kv: (-(kv[1] or 0), kv[0].lower()))
+        for palavra, _peso in ordenadas:
+            chave = palavra.lower().strip()
+            if chave and chave not in vistos:
+                vistos.add(chave)
+                resultado.append(palavra)
+    return resultado
