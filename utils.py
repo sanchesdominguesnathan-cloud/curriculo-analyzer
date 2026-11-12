@@ -11,7 +11,12 @@ import re
 import hashlib
 import unicodedata
 from datetime import datetime
-from dateutil import parser as dateparser
+
+SIGLAS_ESTADO = {
+    "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS",
+    "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC",
+    "SP", "SE", "TO",
+}
 
 
 def normalizar_texto(texto: str) -> str:
@@ -30,68 +35,83 @@ def gerar_hash_arquivo(conteudo_binario: bytes) -> str:
     return hashlib.sha256(conteudo_binario).hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# Datas e períodos de experiência
+# ---------------------------------------------------------------------------
+
 MESES_PT = {
     "janeiro": 1, "fevereiro": 2, "marco": 3, "março": 3, "abril": 4,
     "maio": 5, "junho": 6, "julho": 7, "agosto": 8, "setembro": 9,
     "outubro": 10, "novembro": 11, "dezembro": 12,
     "jan": 1, "fev": 2, "mar": 3, "abr": 4, "mai": 5, "jun": 6,
     "jul": 7, "ago": 8, "set": 9, "out": 10, "nov": 11, "dez": 12,
+    # Inglês (currículos bilíngues: "Jan 2020 - Dec 2022")
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11,
+    "december": 12,
+    "feb": 2, "apr": 4, "aug": 8, "sep": 9, "sept": 9, "oct": 10, "dec": 12,
 }
 
-# Classe de caracteres usada para nomes de mês por extenso. Inclui letras
-# acentuadas (ex: "março") porque extrair_periodos roda sobre o texto
-# ORIGINAL do currículo, ainda não normalizado (sem remover acentos).
-_LETRAS_MES = r"a-zçãáéíóúâêôà"
+# Correção: antes o "mês por extenso" aceitava QUALQUER palavra de 3 a 10
+# letras antes do ano (ex.: "Itaú 2018", "SAP 2019"). Essas palavras não eram
+# meses, caíam num parser genérico (dateutil, fuzzy=True) que preenchia o mês
+# e o dia com os de HOJE — a experiência calculada mudava conforme o dia em
+# que o currículo era analisado. Agora só nomes de mês reais são aceitos.
+_MESES_ALT = "|".join(sorted((re.escape(m) for m in MESES_PT), key=len, reverse=True))
+_MES_ANO = (
+    r"(?<![a-zçãáéíóúâêôà])(?:" + _MESES_ALT + r")\.?\s*(?:de\s+)?[/\-]?\s*\d{4}"
+)
+_DATA = r"(?:\d{1,2}[/\-]\d{4}|" + _MES_ANO + r"|\d{4})"
+_FIM_ATUAL = r"atualmente|atualidade|atual|presente|hoje|current|present|now|o\s+momento|andamento"
 
 PADRAO_PERIODO = re.compile(
-    r"(?P<inicio>(\d{1,2}[/\-]\d{4})|(\d{4})|([" + _LETRAS_MES + r"]{3,10}\s*(?:de\s+)?[/\-]?\s*\d{4}))"
-    r"\s*(?:a|até|-|–|—)\s*"
-    r"(?P<fim>(\d{1,2}[/\-]\d{4})|(\d{4})|([" + _LETRAS_MES + r"]{3,10}\s*(?:de\s+)?[/\-]?\s*\d{4})|atual|presente|atualmente)",
-    re.IGNORECASE
+    r"(?P<inicio>" + _DATA + r")"
+    r"\s*(?:a|até|ate|-|–|—|to)\s*"
+    r"(?P<fim>" + _DATA + r"|" + _FIM_ATUAL + r")",
+    re.IGNORECASE,
 )
+
+_ANO_MINIMO = 1950
+
+
+def _ano_valido(ano: int) -> bool:
+    return _ANO_MINIMO <= ano <= datetime.now().year + 1
 
 
 def _parse_data_flexivel(texto_data: str, fim_periodo=False):
-    """Tenta converter uma string de data (varios formatos PT-BR) em objeto datetime."""
-    texto_data = texto_data.strip().lower()
-    if texto_data in ("atual", "presente", "atualmente", "hoje"):
+    """Converte uma string de data (formatos PT-BR/EN) em datetime.
+    Retorna None se não reconhecer — nunca "chuta" usando a data de hoje."""
+    t = re.sub(r"\s+", " ", texto_data.strip().lower())
+
+    if re.fullmatch(_FIM_ATUAL, t):
         return datetime.now()
 
-    # formato mes/ano por extenso: "janeiro 2020", "jan/2020" ou, escrito em
-    # prosa, "janeiro de 2020" (com a preposição "de" entre o mês e o ano —
-    # muito comum em currículos colados como texto corrido, ex: Google Forms).
-    m = re.match(r"([" + _LETRAS_MES + r"]+)\s*(?:de\s+)?[/\-]?\s*(\d{4})", texto_data)
+    # mês por extenso/abreviado + ano: "janeiro 2020", "jan/2020", "janeiro de 2020"
+    m = re.match(r"(" + _MESES_ALT + r")\.?\s*(?:de\s+)?[/\-]?\s*(\d{4})$", t)
     if m:
-        mes_txt, ano_txt = m.groups()
-        mes_txt_norm = normalizar_texto(mes_txt)
-        mes = MESES_PT.get(mes_txt_norm)
-        if mes:
-            try:
-                return datetime(int(ano_txt), mes, 1)
-            except ValueError:
-                pass
+        mes = MESES_PT.get(m.group(1))
+        ano = int(m.group(2))
+        if mes and _ano_valido(ano):
+            return datetime(ano, mes, 1)
+        return None
 
-    # formato numerico mm/aaaa
-    m = re.match(r"(\d{1,2})[/\-](\d{4})", texto_data)
+    # numérico mm/aaaa
+    m = re.match(r"(\d{1,2})[/\-](\d{4})$", t)
     if m:
-        mes, ano = m.groups()
-        try:
-            return datetime(int(ano), int(mes), 1)
-        except ValueError:
-            pass
+        mes, ano = int(m.group(1)), int(m.group(2))
+        if 1 <= mes <= 12 and _ano_valido(ano):
+            return datetime(ano, mes, 1)
+        return None
 
     # apenas ano
-    m = re.match(r"^(\d{4})$", texto_data)
+    m = re.match(r"^(\d{4})$", t)
     if m:
         ano = int(m.group(1))
-        mes = 12 if fim_periodo else 1
-        return datetime(ano, mes, 1)
-
-    # tenta parser genérico como último recurso
-    try:
-        return dateparser.parse(texto_data, fuzzy=True, dayfirst=True)
-    except Exception:
+        if _ano_valido(ano):
+            return datetime(ano, 12 if fim_periodo else 1, 1)
         return None
+
+    return None
 
 
 def extrair_periodos(texto: str):
@@ -100,10 +120,8 @@ def extrair_periodos(texto: str):
     tuplas (data_inicio, data_fim)."""
     periodos = []
     for match in PADRAO_PERIODO.finditer(texto):
-        inicio_txt = match.group("inicio")
-        fim_txt = match.group("fim")
-        inicio = _parse_data_flexivel(inicio_txt)
-        fim = _parse_data_flexivel(fim_txt, fim_periodo=True)
+        inicio = _parse_data_flexivel(match.group("inicio"))
+        fim = _parse_data_flexivel(match.group("fim"), fim_periodo=True)
         if inicio and fim and fim >= inicio:
             periodos.append((inicio, fim))
     return periodos
@@ -111,7 +129,10 @@ def extrair_periodos(texto: str):
 
 def calcular_meses_experiencia(periodos):
     """Recebe lista de tuplas (inicio, fim) e retorna total de meses,
-    mesclando períodos sobrepostos para não contar experiência em duplicidade."""
+    mesclando períodos sobrepostos para não contar experiência em duplicidade.
+
+    A contagem é inclusiva: 'jan/2018 a dez/2020' são 36 meses (antes dava 35,
+    e 'jun a jun' dava 0). Assim 'jan a jun' + 'jul a dez' somam 12 meses."""
     if not periodos:
         return 0
 
@@ -127,7 +148,7 @@ def calcular_meses_experiencia(periodos):
 
     total_meses = 0
     for inicio, fim in mesclados:
-        diff = (fim.year - inicio.year) * 12 + (fim.month - inicio.month)
+        diff = (fim.year - inicio.year) * 12 + (fim.month - inicio.month) + 1
         total_meses += max(diff, 1)
     return total_meses
 
@@ -146,36 +167,61 @@ def formatar_experiencia(total_meses: int) -> str:
     return " e ".join(partes)
 
 
+# ---------------------------------------------------------------------------
+# Resumo automático
+# ---------------------------------------------------------------------------
+
+_NAO_INFORMADO = {"", "nao identificado", "nao informado", "nao especificado", "nao identificada"}
+
+
+def _informado(valor) -> bool:
+    """True se o valor tem conteúdo real (não vazio e não um 'Não identificado')."""
+    return bool(valor) and normalizar_texto(str(valor)) not in _NAO_INFORMADO
+
+
 def gerar_resumo_candidato(dados: dict) -> str:
     """Gera um resumo automático de poucas linhas sobre o candidato,
-    com base nos dados extraídos do currículo (sem depender de API externa)."""
-    nome = dados.get("nome") or "Profissional"
-    exp_txt = dados.get("experiencia_formatada") or "experiência não identificada"
+    com base nos dados extraídos do currículo (sem depender de API externa).
+
+    Correções: (1) 'Não identificado' era tratado como experiência válida e
+    gerava frases como 'possui aproximadamente Não identificado de
+    experiência'; (2) o nome 'Não identificado' virava sujeito da frase;
+    (3) idiomas sem nível saíam como 'Inglês (Não especificado)'."""
+    nome = dados.get("nome")
+    sujeito = nome if _informado(nome) else "Candidato(a)"
+
+    exp_txt = dados.get("experiencia_formatada")
     competencias = dados.get("competencias_encontradas") or []
     formacao = dados.get("formacao_nivel") or ""
     area_formacao = dados.get("formacao_area") or ""
     idiomas = dados.get("idiomas") or {}
 
-    top_competencias = ", ".join(competencias[:4]) if competencias else "não identificadas"
+    frases = []
 
-    frase_formacao = ""
+    if _informado(exp_txt):
+        frases.append(f"{sujeito} possui aproximadamente {exp_txt} de experiência profissional.")
+    else:
+        frases.append(f"{sujeito}: experiência profissional não identificada no currículo.")
+
+    cargos = [c for c in (dados.get("cargos") or []) if _informado(c)]
+    if cargos:
+        frases.append(f"Cargos: {', '.join(cargos[:3])}.")
+
+    if competencias:
+        frases.append(f"Principais competências: {', '.join(competencias[:4])}.")
+    else:
+        frases.append("Principais competências: não identificadas.")
+
     if formacao and area_formacao:
-        frase_formacao = f"Formação em {area_formacao} ({formacao})."
+        frases.append(f"Formação em {area_formacao} ({formacao}).")
     elif formacao:
-        frase_formacao = f"Formação: {formacao}."
+        frases.append(f"Formação: {formacao}.")
 
-    frase_idiomas = ""
     if idiomas:
         idiomas_txt = ", ".join(
-            f"{idioma} ({nivel})" if nivel else idioma
+            f"{idioma} ({nivel})" if _informado(nivel) else idioma
             for idioma, nivel in idiomas.items()
         )
-        frase_idiomas = f"Idiomas: {idiomas_txt}."
+        frases.append(f"Idiomas: {idiomas_txt}.")
 
-    resumo = (
-        f"{nome} possui aproximadamente {exp_txt} de experiência profissional. "
-        f"Principais competências: {top_competencias}. "
-        f"{frase_formacao} {frase_idiomas}"
-    ).strip()
-
-    return re.sub(r"\s+", " ", resumo)
+    return re.sub(r"\s+", " ", " ".join(frases)).strip()

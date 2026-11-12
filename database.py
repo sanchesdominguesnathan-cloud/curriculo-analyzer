@@ -119,8 +119,7 @@ def inicializar_banco():
                 status TEXT,
                 data_analise TIMESTAMP NOT NULL DEFAULT NOW(),
                 vaga_descricao TEXT,
-                vaga_id INTEGER REFERENCES vagas(id) ON DELETE SET NULL,
-                UNIQUE (empresa_id, hash_arquivo)
+                vaga_id INTEGER REFERENCES vagas(id) ON DELETE SET NULL
             )
         """)
         cur.execute("""
@@ -142,6 +141,45 @@ def inicializar_banco():
         # que já existem em produção, sem precisar de migração manual.
         cur.execute("""
             ALTER TABLE curriculos ADD COLUMN IF NOT EXISTS decisao_manual TEXT
+        """)
+
+        # Correção (candidatos "pulando"): a unicidade era (empresa_id,
+        # hash_arquivo), ou seja, UMA linha por arquivo na empresa inteira.
+        # Ao analisar o mesmo currículo para uma segunda vaga, o ON CONFLICT
+        # sobrescrevia a linha e MOVIA o candidato para a vaga nova — ele
+        # sumia da primeira, com a nota da segunda. Agora a unicidade é por
+        # (empresa, vaga, arquivo): o mesmo currículo pode concorrer a várias
+        # vagas, uma linha em cada, e dentro de uma vaga nunca duplica.
+        # COALESCE(vaga_id, 0) faz os currículos sem vaga também serem únicos
+        # (NULL é sempre "diferente" de NULL num índice único comum).
+        # Idempotente: seguro de rodar em bancos que já existem em produção.
+        cur.execute("""
+            ALTER TABLE curriculos
+            DROP CONSTRAINT IF EXISTS curriculos_empresa_id_hash_arquivo_key
+        """)
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_curriculos_empresa_vaga_hash
+                ON curriculos (empresa_id, (COALESCE(vaga_id, 0)), hash_arquivo)
+        """)
+
+        # Falhas de login/cadastro, para o limite de tentativas. Fica no banco
+        # (e não no session_state) porque o contador da sessão zerava ao abrir
+        # outra aba ou recarregar a página.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tentativas_falhas (
+                id SERIAL PRIMARY KEY,
+                chave TEXT NOT NULL,
+                data TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tentativas_falhas_chave
+                ON tentativas_falhas(chave, data)
+        """)
+
+        # Planilha do Google Forms de cada empresa (antes fixa no código).
+        cur.execute("""
+            ALTER TABLE empresas ADD COLUMN IF NOT EXISTS forms_sheet_id TEXT
         """)
 
         # Correção #18: índices para as queries de busca mais frequentes.
@@ -197,6 +235,96 @@ def autenticar_empresa(email: str, senha: str):
         return None
 
 
+MAX_FALHAS = 5
+JANELA_BLOQUEIO_MIN = 15
+
+
+def segundos_de_bloqueio(chave: str, max_falhas: int = MAX_FALHAS, janela_min: int = JANELA_BLOQUEIO_MIN) -> int:
+    """Segundos até a chave (e-mail ou '__cadastro__') poder tentar de novo.
+    0 se não estiver bloqueada. Bloqueia ao atingir `max_falhas` falhas
+    dentro da janela; libera quando a falha mais antiga sai da janela."""
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT COUNT(*) AS n,
+                   EXTRACT(EPOCH FROM (MIN(data) + make_interval(mins => %s) - NOW())) AS espera
+            FROM tentativas_falhas
+            WHERE chave = %s AND data > NOW() - make_interval(mins => %s)
+        """, (janela_min, chave, janela_min))
+        linha = cur.fetchone()
+        cur.close()
+    if linha["n"] >= max_falhas and linha["espera"] is not None:
+        return max(1, int(linha["espera"]))
+    return 0
+
+
+def registrar_falha(chave: str):
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO tentativas_falhas (chave) VALUES (%s)", (chave,))
+        # limpeza: falhas com mais de 1 dia não servem para nada
+        cur.execute("DELETE FROM tentativas_falhas WHERE data < NOW() - INTERVAL '1 day'")
+        cur.close()
+
+
+def limpar_falhas(chave: str):
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM tentativas_falhas WHERE chave = %s", (chave,))
+        cur.close()
+
+
+def tentar_login(email: str, senha: str):
+    """Login com limite de tentativas por e-mail, guardado no banco.
+
+    Retorna (empresa | None, segundos_de_bloqueio, tentativas_restantes).
+    Enquanto bloqueado, a senha nem é verificada. Conta inexistente também
+    registra falha, para não revelar quais e-mails estão cadastrados.
+    Contrapartida: quem erra a senha 5 vezes para o e-mail de outra pessoa
+    bloqueia esse e-mail por 15 minutos."""
+    chave = (email or "").lower().strip()
+    espera = segundos_de_bloqueio(chave)
+    if espera > 0:
+        return None, espera, 0
+
+    empresa = autenticar_empresa(email, senha)
+    if empresa:
+        limpar_falhas(chave)
+        return empresa, 0, MAX_FALHAS
+
+    registrar_falha(chave)
+    espera = segundos_de_bloqueio(chave)
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM tentativas_falhas WHERE chave = %s "
+            "AND data > NOW() - make_interval(mins => %s)",
+            (chave, JANELA_BLOQUEIO_MIN),
+        )
+        usadas = cur.fetchone()["n"]
+        cur.close()
+    return None, espera, max(0, MAX_FALHAS - usadas)
+
+
+def obter_sheet_id_forms(empresa_id: int):
+    """ID da planilha de respostas do Google Forms da empresa (ou None)."""
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT forms_sheet_id FROM empresas WHERE id = %s", (empresa_id,))
+        linha = cur.fetchone()
+        cur.close()
+    return (linha["forms_sheet_id"] or "").strip() or None if linha else None
+
+
+def definir_sheet_id_forms(empresa_id: int, sheet_id):
+    """Define (ou limpa, com None) a planilha do Forms de uma empresa."""
+    with conectar() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE empresas SET forms_sheet_id = %s WHERE id = %s",
+                    ((sheet_id or "").strip() or None, empresa_id))
+        cur.close()
+
+
 def listar_empresas():
     with conectar() as conn:
         cur = conn.cursor()
@@ -231,12 +359,15 @@ def _aplicar_decisao_manual(dados: dict, decisao_manual):
     return dados
 
 
-def curriculo_ja_analisado(empresa_id: int, hash_arquivo: str):
+def curriculo_ja_analisado(empresa_id: int, hash_arquivo: str, vaga_id: int = None):
+    """Busca a análise já salva deste arquivo NESTA vaga (o mesmo arquivo
+    pode ter uma análise diferente em cada vaga)."""
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT * FROM curriculos WHERE empresa_id = %s AND hash_arquivo = %s",
-            (empresa_id, hash_arquivo),
+            "SELECT * FROM curriculos WHERE empresa_id = %s AND hash_arquivo = %s "
+            "AND vaga_id IS NOT DISTINCT FROM %s",
+            (empresa_id, hash_arquivo, vaga_id),
         )
         linha = cur.fetchone()
         cur.close()
@@ -301,12 +432,17 @@ def salvar_curriculo(empresa_id: int, hash_arquivo: str, nome_arquivo: str, dado
                 cidade, dados_json, score_final, status, data_analise,
                 vaga_descricao, vaga_id
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (empresa_id, hash_arquivo) DO UPDATE SET
+            ON CONFLICT (empresa_id, (COALESCE(vaga_id, 0)), hash_arquivo) DO UPDATE SET
+                nome_arquivo = EXCLUDED.nome_arquivo,
+                nome_candidato = EXCLUDED.nome_candidato,
+                email = EXCLUDED.email,
+                telefone = EXCLUDED.telefone,
+                cidade = EXCLUDED.cidade,
                 dados_json = EXCLUDED.dados_json,
                 score_final = EXCLUDED.score_final,
                 status = EXCLUDED.status,
                 data_analise = EXCLUDED.data_analise,
-                vaga_id = COALESCE(EXCLUDED.vaga_id, curriculos.vaga_id)
+                vaga_descricao = EXCLUDED.vaga_descricao
             RETURNING id
         """, (
             empresa_id, hash_arquivo, nome_arquivo,
@@ -320,7 +456,10 @@ def salvar_curriculo(empresa_id: int, hash_arquivo: str, nome_arquivo: str, dado
         return id_banco
 
 
-def registrar_decisao(curriculo_id: int, decisao: str):
+DECISOES_VALIDAS = {"Aprovado", "Talvez", "Reprovado"}
+
+
+def registrar_decisao(empresa_id: int, curriculo_id: int, decisao: str):
     """Registra a decisão manual do recrutador sobre um candidato
     (espera-se "Aprovado", "Talvez" ou "Reprovado").
 
@@ -339,15 +478,25 @@ def registrar_decisao(curriculo_id: int, decisao: str):
     mais recente — essa coluna passa a valer como o status "oficial" do
     candidato, sobrepondo o automático, tanto na tabela quanto no
     dashboard, e persistindo entre sessões."""
+    if decisao not in DECISOES_VALIDAS:
+        raise ValueError(f"Decisão inválida: {decisao!r}.")
+
     with conectar() as conn:
         cur = conn.cursor()
+        # Correção (segurança multi-tenant): o UPDATE só vale se o currículo
+        # pertencer à empresa informada. Antes a função recebia só o id, e
+        # qualquer id (sequencial, fácil de adivinhar) alterava o currículo
+        # de OUTRA empresa e ainda contaminava o aprendizado dela.
+        cur.execute(
+            "UPDATE curriculos SET decisao_manual = %s WHERE id = %s AND empresa_id = %s RETURNING id",
+            (decisao, curriculo_id, empresa_id),
+        )
+        if cur.fetchone() is None:
+            cur.close()
+            raise PermissionError("Currículo não encontrado para esta empresa.")
         cur.execute(
             "INSERT INTO decisoes (curriculo_id, decisao, data_decisao) VALUES (%s, %s, %s)",
             (curriculo_id, decisao, datetime.now()),
-        )
-        cur.execute(
-            "UPDATE curriculos SET decisao_manual = %s WHERE id = %s",
-            (decisao, curriculo_id),
         )
         cur.close()
 
@@ -365,9 +514,16 @@ def calcular_ajuste_aprendizado(empresa_id: int, competencias_candidato: list) -
 
     with conectar() as conn:
         cur = conn.cursor()
+        # Só a decisão MAIS RECENTE de cada currículo conta. Antes, cada clique
+        # virava uma linha e um candidato que o recrutador trocou de Aprovado
+        # para Reprovado pesava duas vezes no aprendizado.
         cur.execute("""
             SELECT c.dados_json, d.decisao
-            FROM decisoes d
+            FROM (
+                SELECT DISTINCT ON (curriculo_id) curriculo_id, decisao, data_decisao
+                FROM decisoes
+                ORDER BY curriculo_id, data_decisao DESC, id DESC
+            ) d
             JOIN curriculos c ON c.id = d.curriculo_id
             WHERE c.empresa_id = %s
             ORDER BY d.data_decisao DESC
@@ -408,7 +564,8 @@ def listar_curriculos_por_vaga(empresa_id: int, vaga_id: int):
     with conectar() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT * FROM curriculos WHERE empresa_id = %s AND vaga_id = %s ORDER BY score_final DESC",
+            "SELECT * FROM curriculos WHERE empresa_id = %s AND vaga_id = %s "
+            "ORDER BY score_final DESC NULLS LAST, id",
             (empresa_id, vaga_id),
         )
         resultados = []
@@ -490,6 +647,17 @@ def obter_vaga(empresa_id: int, vaga_id: int):
 def excluir_vaga(empresa_id: int, vaga_id: int):
     with conectar() as conn:
         cur = conn.cursor()
+        # Com a unicidade por (empresa, vaga, arquivo), soltar o currículo da
+        # vaga (vaga_id = NULL) poderia colidir com um que já esteja sem vaga.
+        # Nesse caso o duplicado é removido; os demais ficam sem vaga.
+        cur.execute("""
+            DELETE FROM curriculos c
+            WHERE c.vaga_id = %s AND c.empresa_id = %s
+              AND EXISTS (SELECT 1 FROM curriculos o
+                          WHERE o.empresa_id = c.empresa_id
+                            AND o.hash_arquivo = c.hash_arquivo
+                            AND o.vaga_id IS NULL)
+        """, (vaga_id, empresa_id))
         cur.execute("UPDATE curriculos SET vaga_id = NULL WHERE vaga_id = %s AND empresa_id = %s", (vaga_id, empresa_id))
         cur.execute("DELETE FROM vagas WHERE id = %s AND empresa_id = %s", (vaga_id, empresa_id))
         cur.close()
@@ -509,6 +677,7 @@ def limpar_banco():
         )
     with conectar() as conn:
         cur = conn.cursor()
+        cur.execute("DELETE FROM tentativas_falhas")
         cur.execute("DELETE FROM decisoes")
         cur.execute("DELETE FROM curriculos")
         cur.execute("DELETE FROM vagas")

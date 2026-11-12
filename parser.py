@@ -7,17 +7,25 @@ email, cidade, LinkedIn, experiência, formação, idiomas, competências, etc.
 
 import re
 import io
+import unicodedata
 from datetime import datetime
 import pdfplumber
 import docx
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 
 from utils import (
     normalizar_texto,
     extrair_periodos,
     calcular_meses_experiencia,
     formatar_experiencia,
+    SIGLAS_ESTADO,
 )
-from keywords import encontrar_ocorrencias, listar_todas_palavras_chave_sugeridas
+from keywords import (
+    encontrar_ocorrencias,
+    listar_todas_palavras_chave_sugeridas,
+    BASE_SINONIMOS,
+)
 
 # ---------------------------------------------------------------------------
 # Extração de texto bruto
@@ -32,25 +40,60 @@ def extrair_texto_pdf(arquivo_bytes: bytes) -> str:
     return "\n".join(texto_completo)
 
 
+def _linhas_da_tabela(tabela) -> list:
+    """Uma linha de texto por parágrafo de cada célula. Células mescladas
+    aparecem várias vezes em `row.cells` (uma por coluna coberta); aqui cada
+    célula é lida uma única vez, para não duplicar o texto."""
+    linhas = []
+    for linha in tabela.rows:
+        vistas = set()
+        for celula in linha.cells:
+            if id(celula._tc) in vistas:
+                continue
+            vistas.add(id(celula._tc))
+            for paragrafo in celula.paragraphs:
+                if paragrafo.text.strip():
+                    linhas.append(paragrafo.text.strip())
+    return linhas
+
+
 def extrair_texto_docx(arquivo_bytes: bytes) -> str:
+    """Lê parágrafos e tabelas NA ORDEM em que aparecem no documento.
+
+    Correção: antes todos os parágrafos vinham primeiro e as tabelas só no
+    fim. Em modelos de currículo que colocam o nome/contato dentro de uma
+    tabela, o nome ia parar depois de todo o resto do texto e não era achado
+    entre as primeiras linhas."""
     documento = docx.Document(io.BytesIO(arquivo_bytes))
-    partes = [p.text for p in documento.paragraphs if p.text.strip()]
-    for tabela in documento.tables:
-        for linha in tabela.rows:
-            for celula in linha.cells:
-                if celula.text.strip():
-                    partes.append(celula.text.strip())
+    partes = []
+    for filho in documento.element.body.iterchildren():
+        tag = filho.tag.rsplit("}", 1)[-1]
+        if tag == "p":
+            texto = Paragraph(filho, documento).text
+            if texto.strip():
+                partes.append(texto)
+        elif tag == "tbl":
+            partes.extend(_linhas_da_tabela(Table(filho, documento)))
     return "\n".join(partes)
 
 
 def extrair_texto(nome_arquivo: str, arquivo_bytes: bytes) -> str:
     nome_lower = nome_arquivo.lower()
-    if nome_lower.endswith(".pdf"):
-        return extrair_texto_pdf(arquivo_bytes)
-    elif nome_lower.endswith(".docx"):
-        return extrair_texto_docx(arquivo_bytes)
-    else:
+    if not (nome_lower.endswith(".pdf") or nome_lower.endswith(".docx")):
         raise ValueError(f"Formato de arquivo não suportado: {nome_arquivo}")
+    try:
+        if nome_lower.endswith(".pdf"):
+            return extrair_texto_pdf(arquivo_bytes)
+        return extrair_texto_docx(arquivo_bytes)
+    except ValueError:
+        raise
+    except Exception as e:
+        # Arquivo corrompido/protegido: PdfminerException, BadZipFile,
+        # PackageNotFoundError etc. viram um ValueError com mensagem clara.
+        raise ValueError(
+            f"Não foi possível ler '{nome_arquivo}' (arquivo corrompido, protegido por senha "
+            f"ou em formato inválido)."
+        ) from e
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +101,10 @@ def extrair_texto(nome_arquivo: str, arquivo_bytes: bytes) -> str:
 # ---------------------------------------------------------------------------
 
 REGEX_EMAIL = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
+# Correção: sem as travas de dígito antes/depois, o padrão casava pedaços de
+# números maiores (CPF, CEP, anos colados) — ver extrair_telefone.
 REGEX_TELEFONE = re.compile(
-    r"(?:\+?55\s*)?(?:\(?\d{2}\)?[\s.-]?)?(?:9\s?)?\d{4}[\s.-]?\d{4}"
+    r"(?<![\d/])(?:\+?55[\s.-]*)?(?:\(?\d{2}\)?[\s.-]?)?(?:9[\s.-]?)?\d{4}[\s.-]?\d{4}(?![\d/])"
 )
 REGEX_LINKEDIN = re.compile(r"(?:linkedin\.com/in/[a-zA-Z0-9\-_/]+)", re.IGNORECASE)
 
@@ -74,12 +119,7 @@ _CIDADES_COMUNS_LISTA = [
 ]
 CIDADES_COMUNS = {normalizar_texto(c): c for c in _CIDADES_COMUNS_LISTA}
 
-SIGLAS_ESTADO = {
-    "AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS",
-    "MG","PA","PB","PR","PE","PI","RJ","RN","RS","RO","RR","SC",
-    "SP","SE","TO",
-}
-
+# Nível de formação -> rótulo. A ordem importa: vence o primeiro que aparecer.
 NIVEIS_FORMACAO_ORDENADO = [
     ("doutorado", "Doutorado"),
     ("phd", "Doutorado"),
@@ -98,14 +138,43 @@ NIVEIS_FORMACAO_ORDENADO = [
     ("ensino fundamental", "Ensino Fundamental"),
 ]
 
-AREAS_FORMACAO = [
-    "administracao", "economia", "direito", "psicologia", "recursos humanos",
-    "engenharia civil", "engenharia",
-    "contabilidade", "ciencias contabeis", "marketing",
-    "sistemas de informacao", "ciencia da computacao", "publicidade",
-    "pedagogia", "logistica", "gestao comercial", "gestao financeira",
-    "relacoes internacionais", "comunicacao social", "medicina", "enfermagem",
-]
+# chave normalizada -> nome para exibição (antes saía "Administracao",
+# "Gestao Comercial" etc. sem acento, direto no resumo do candidato).
+# A ordem importa: "engenharia civil" precisa vir antes de "engenharia".
+AREAS_FORMACAO = {
+    "administracao": "Administração",
+    "economia": "Economia",
+    "direito": "Direito",
+    "psicologia": "Psicologia",
+    "recursos humanos": "Recursos Humanos",
+    "engenharia civil": "Engenharia Civil",
+    "engenharia": "Engenharia",
+    "contabilidade": "Contabilidade",
+    "ciencias contabeis": "Ciências Contábeis",
+    "marketing": "Marketing",
+    "sistemas de informacao": "Sistemas de Informação",
+    "ciencia da computacao": "Ciência da Computação",
+    "publicidade": "Publicidade",
+    "pedagogia": "Pedagogia",
+    "logistica": "Logística",
+    "gestao comercial": "Gestão Comercial",
+    "gestao financeira": "Gestão Financeira",
+    "relacoes internacionais": "Relações Internacionais",
+    "comunicacao social": "Comunicação Social",
+    "medicina": "Medicina",
+    "enfermagem": "Enfermagem",
+}
+
+
+def _regex_palavra_inteira(chave: str):
+    return re.compile(r"(?<![a-z0-9])" + re.escape(chave) + r"(?![a-z0-9])")
+
+
+# Correção: a busca era por substring pura. "mba" casava dentro de
+# "embalagem", "embarque", "combate"..., e currículos de logística/segurança
+# ganhavam "MBA" (90 pontos de formação).
+_NIVEIS_FORMACAO_REGEX = [(_regex_palavra_inteira(k), v) for k, v in NIVEIS_FORMACAO_ORDENADO]
+_AREAS_FORMACAO_REGEX = [(_regex_palavra_inteira(k), v) for k, v in AREAS_FORMACAO.items()]
 
 IDIOMAS_CONHECIDOS = {
     "portugues": "Português",
@@ -124,6 +193,10 @@ NIVEIS_IDIOMA = {
     "nativo": "Nativo",
 }
 
+# ---------------------------------------------------------------------------
+# Extração do NOME
+# ---------------------------------------------------------------------------
+
 ROTULOS_SECAO_IGNORAR = [
     "objetivo", "dados pessoais", "informacoes pessoais", "perfil profissional",
     "perfil", "resumo profissional", "resumo", "sobre mim", "apresentacao",
@@ -137,7 +210,7 @@ PREFIXOS_DADOS_PESSOAIS = [
     "estado civil", "nacionalidade", "data de nascimento", "nascimento",
     "cpf", "rg", "sexo", "genero",
     "brasileiro", "brasileira", "solteiro", "solteira", "casado", "casada",
-    "endereco", "endereço",
+    "endereco",
 ]
 
 PREFIXOS_CARGO_OBJETIVO = [
@@ -147,42 +220,101 @@ PREFIXOS_CARGO_OBJETIVO = [
     "atuar", "busco", "procuro",
 ]
 
-PREPOSICOES_NOME = {"de", "da", "do", "dos", "das", "e", "van", "von", "del"}
+PREPOSICOES_NOME = {
+    "de", "da", "do", "dos", "das", "e", "di", "du", "del", "della",
+    "van", "von", "der", "den", "la", "le", "y",
+}
+
+# Palavras que NUNCA fazem parte de um nome de pessoa: títulos de seção,
+# rótulos de contato e termos de currículo. Correção: o "caso geral" aceitava
+# QUALQUER linha curta com iniciais maiúsculas, então "Informações de
+# Contato", "Dados Profissionais", "Carteira de Habilitação" ou "Redes
+# Sociais" viravam o nome do candidato.
+PALAVRAS_NAO_NOME = {
+    "curriculo", "curriculum", "vitae", "cv", "resume", "resumo", "perfil",
+    "profile", "objetivo", "objetivos", "objective", "dados", "pessoais",
+    "pessoal", "profissional", "profissionais", "informacoes", "informacao",
+    "contato", "contatos", "contact", "formacao", "educacao", "education",
+    "escolaridade", "academica", "academico", "academicos", "experiencia",
+    "experiencias", "experience", "idiomas", "idioma", "languages", "language",
+    "cursos", "curso", "certificacoes", "certificacao", "certificados",
+    "habilidades", "skills", "competencias", "qualificacoes", "referencias",
+    "projetos", "atividades", "complementares", "extracurriculares",
+    "voluntariado", "carteira", "habilitacao", "redes", "sociais",
+    "disponibilidade", "pretensao", "salarial", "endereco", "telefone",
+    "celular", "fone", "tel", "cel", "email", "mail", "whatsapp", "linkedin",
+    "github", "portfolio", "sobre", "mim", "apresentacao", "identificacao",
+    "tecnologias", "ferramentas", "conquistas", "publicacoes", "premios",
+    "adicionais", "adicional", "summary", "resumo", "pagina", "page",
+}
+
+
+def _tokens_competencia() -> set:
+    """Palavras das áreas/competências conhecidas (ex.: "Gestão Financeira",
+    "Recursos Humanos", "Marketing Digital") — também não são nomes."""
+    tokens = set()
+    for chave, variacoes in BASE_SINONIMOS.items():
+        for texto in [chave, *variacoes]:
+            for t in re.findall(r"[a-z]+", normalizar_texto(texto)):
+                if len(t) >= 5:
+                    tokens.add(t)
+    for chave in AREAS_FORMACAO:
+        for t in re.findall(r"[a-z]+", chave):
+            if len(t) >= 5:
+                tokens.add(t)
+    return tokens
+
+
+_TOKENS_NAO_NOME = PALAVRAS_NAO_NOME | _tokens_competencia()
+
+_REGEX_PALAVRA_NOME = re.compile(r"^[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'’.\-]*$")
+
+_ACENTOS_SOLTOS = {
+    "´": "́", "`": "̀", "^": "̂", "ˆ": "̂",
+    "¨": "̈", "~": "̃", "˜": "̃", "¸": "̧",
+}
+_REGEX_ACENTO_SOLTO = re.compile(r"([´`^ˆ¨~˜¸])([A-Za-z])")
+# Símbolos, caracteres de controle/formatação e "private use" (bullets do
+# Word como ) são descartados; letras, marcas e pontuação ficam.
+_CATEGORIAS_REMOVIDAS = {"Cc", "Cf", "Co", "Cs", "Cn", "So", "Sk", "Sm", "Sc"}
+
+
+def _match_inicio(padroes: list, linha: str) -> bool:
+    ln = normalizar_texto(linha)
+    return any(re.match(r"^" + re.escape(p) + r"\b", ln) for p in padroes)
 
 
 def _parece_dado_pessoal(linha: str) -> bool:
-    ln = normalizar_texto(linha)
-    return any(ln.startswith(p) for p in PREFIXOS_DADOS_PESSOAIS)
+    return _match_inicio(PREFIXOS_DADOS_PESSOAIS, linha)
 
 
 def _parece_cargo_objetivo(linha: str) -> bool:
     ln = normalizar_texto(linha)
-    return any(ln.startswith(p) for p in PREFIXOS_CARGO_OBJETIVO)
+    primeira = ln.split()[0] if ln.split() else ""
+    return any(primeira.startswith(p) for p in PREFIXOS_CARGO_OBJETIVO)
+
+
+def _tem_palavra_nao_nome(linha: str) -> bool:
+    return any(t in _TOKENS_NAO_NOME for t in re.findall(r"[a-z]+", normalizar_texto(linha)))
 
 
 def _parece_localizacao(linha: str) -> bool:
-    """Detecta linhas de endereço como 'Jardim Alvorada - Cambé/PR'.
+    """Detecta linhas de endereço como 'Jardim Alvorada - Cambé/PR' ou
+    'Niterói, RJ'.
 
-    Usa a linha normalizada (sem acentos) E a original para cobrir qualquer
-    variação de encoding. Também checa as últimas duas letras após separador.
-    """
-    for texto in (linha.strip(), normalizar_texto(linha)):
-        # "... - UF" ou ".../UF" ou "..., UF"
-        m = re.search(r'[-/,]\s*([A-Za-z]{2})\s*$', texto)
-        if m and m.group(1).upper() in SIGLAS_ESTADO:
-            return True
-        # "... UF" com espaço
-        m2 = re.search(r'\s([A-Za-z]{2})\s*$', texto)
-        if m2 and m2.group(1).upper() in SIGLAS_ESTADO:
-            return True
-
-    # Estratégia extra: últimas 2 letras após qualquer separador
-    partes = re.split(r'[-/,\s]', linha.strip())
-    partes = [p.strip() for p in partes if p.strip()]
-    if partes and partes[-1].upper() in SIGLAS_ESTADO:
+    Correção: a versão anterior comparava com a linha normalizada em
+    minúsculas e aceitava QUALQUER última palavra de 2 letras que coincidisse
+    com uma sigla de estado — "Ana Paula Ma" (MA), "Luiz Pi" (PI) etc. eram
+    descartados como endereço, e o nome verdadeiro se perdia. Agora a sigla
+    precisa estar em MAIÚSCULAS no texto original e vir depois de uma cidade."""
+    t = linha.strip()
+    if not t:
+        return False
+    m = re.search(r"[^\s\-–/,]\s*[-–/,]\s*([A-Z]{2})\s*$", t)
+    if m and m.group(1) in SIGLAS_ESTADO:
         return True
-
-    return False
+    m2 = re.search(r"[A-Za-zÀ-ÿ]\s+([A-Z]{2})\s*$", t)
+    return bool(m2 and m2.group(1) in SIGLAS_ESTADO)
 
 
 def _parece_rotulo_de_secao(linha: str) -> bool:
@@ -194,106 +326,217 @@ def _parece_rotulo_de_secao(linha: str) -> bool:
 
 
 def _limpar_linha(linha: str) -> str:
-    """Remove caracteres especiais não-ASCII como bullets do Word (ex: \uf0b7)."""
-    return re.sub(r'[^\x00-\x7F\u00C0-\u024F]', '', linha).strip()
+    """Normaliza a linha preservando as letras do nome.
+
+    Correção: o filtro antigo apagava tudo fora de ASCII + Latin-1/Latin
+    Estendido. Isso removia (a) ligaduras de PDF como 'ﬁ' e 'ﬂ' — "Filipe"
+    virava "lipe", "Flávio" virava "ávio"; (b) acentos decompostos (e + ´),
+    deixando "José" como "Jose"; e (c) acentos "soltos" que alguns PDFs
+    emitem antes da letra. Agora: acentos soltos são recompostos, NFKC
+    expande ligaduras e compõe acentos, e só símbolos/controles saem."""
+    linha = _REGEX_ACENTO_SOLTO.sub(lambda m: m.group(2) + _ACENTOS_SOLTOS[m.group(1)], linha)
+    linha = unicodedata.normalize("NFKC", linha)
+    linha = "".join(ch for ch in linha if unicodedata.category(ch) not in _CATEGORIAS_REMOVIDAS)
+    linha = re.sub(r"[•·●○▪■□◦➢➤►▶]", " ", linha)
+    linha = re.sub(r"\s+", " ", linha)
+    return linha.strip(" -–—|:;,")
 
 
-def _nome_do_arquivo(nome_arquivo: str) -> str | None:
-    base = re.split(
-        r'[-_]\d',
-        nome_arquivo.lower().replace('.pdf', '').replace('.docx', '')
-    )[0]
-    partes = [p for p in base.split('-') if p.isalpha() and len(p) > 1]
-    if len(partes) >= 2:
-        return " ".join(p.title() for p in partes)
+def _capitalizar_trechos(token: str) -> str:
+    """'d'ávila' -> "D'Ávila"; 'ana-maria' -> 'Ana-Maria'."""
+    return re.sub(r"[A-Za-zÀ-ÖØ-öø-ÿ]+", lambda m: m.group(0).capitalize(), token)
+
+
+def _formatar_nome(nome: str) -> str:
+    """Capitaliza o nome sem os defeitos do str.title(): mantém "da/de/do/
+    dos/das/e" em minúsculas (str.title() gerava "Maria Da Silva"), preserva
+    caixa mista já correta ("McDonald", "DeLuca") e trata apóstrofo/hífen."""
+    saida = []
+    for i, token in enumerate(nome.split()):
+        base = token.lower().strip(".")
+        if i > 0 and base in PREPOSICOES_NOME:
+            saida.append(base)
+        elif token.isupper() or token.islower():
+            saida.append(_capitalizar_trechos(token))
+        else:
+            saida.append(token)
+    return " ".join(saida)
+
+
+_RUIDO_ARQUIVO = {
+    "cv", "curriculo", "curriculum", "vitae", "resume", "atualizado",
+    "atualizada", "final", "novo", "nova", "copia", "copy", "vaga", "pdf",
+    "docx", "doc", "versao", "ver",
+}
+
+
+def _nome_do_arquivo(nome_arquivo: str):
+    """Tenta montar o nome a partir do nome do arquivo ('bruno-carvalhaes-123.pdf',
+    'CV_Maria_Silva.docx'). Aceita separadores '-', '_', espaço e ponto
+    (antes só o '-' funcionava)."""
+    if not nome_arquivo:
+        return None
+    base = re.sub(r"\.(pdf|docx)$", "", nome_arquivo.strip(), flags=re.IGNORECASE)
+    base = re.split(r"[-_\s.]*\(?\d", base)[0]
+    tokens = [t for t in re.split(r"[-_\s.]+", base) if t.isalpha() and len(t) > 1]
+    tokens = [t for t in tokens if normalizar_texto(t) not in _RUIDO_ARQUIVO]
+    if not 2 <= len(tokens) <= 6:
+        return None
+    candidato = " ".join(tokens)
+    if _tem_palavra_nao_nome(candidato):
+        return None
+    return _formatar_nome(candidato)
+
+
+def _remover_rotulo_nome(linha: str) -> str:
+    return re.sub(r"^(?:nome(?:\s+completo)?|name)\s*[:\-–]\s*", "", linha, flags=re.IGNORECASE)
+
+
+def _validar_nome(linha: str, estrito: bool):
+    """Retorna o nome formatado se a linha parecer nome de pessoa, senão None.
+
+    estrito: exige >= 2 palavras (fora preposições), todas com inicial
+    maiúscula. Relaxado: aceita nome de uma palavra ou em minúsculas."""
+    linha = _remover_rotulo_nome(linha)
+    tokens = linha.split()
+    if not tokens or len(tokens) > 6:
+        return None
+    if any(c.isdigit() for c in linha) or "@" in linha:
+        return None
+    if not all(_REGEX_PALAVRA_NOME.match(t) for t in tokens):
+        return None
+    if _tem_palavra_nao_nome(linha):
+        return None
+    if _parece_dado_pessoal(linha) or _parece_cargo_objetivo(linha) or _parece_rotulo_de_secao(linha):
+        return None
+    significativos = [t for t in tokens if t.lower().strip(".") not in PREPOSICOES_NOME]
+    if estrito:
+        if len(significativos) < 2 or not all(t[0].isupper() for t in significativos):
+            return None
+    elif not significativos:
+        return None
+    return _formatar_nome(linha)
+
+
+def _validar_nome_na_linha(linha: str, estrito: bool):
+    """Testa a linha inteira e, se ela juntar nome e cargo/cidade com ' - ',
+    cada pedaço ('Maria Silva - Analista Financeiro')."""
+    for parte in re.split(r"\s+[-–—]\s+", linha):
+        nome = _validar_nome(parte.strip(), estrito)
+        if nome:
+            return nome
     return None
 
 
+def _letras_espacadas(linha_bruta: str):
+    """'B R U N O   C A R V A L H A E S' -> ['BRUNO', 'CARVALHAES'].
+    Com espaço simples entre todas as letras não dá para saber onde uma
+    palavra termina: devolve uma única palavra."""
+    tokens = linha_bruta.split()
+    if len(tokens) >= 4 and all(len(t) == 1 and t.isalpha() for t in tokens):
+        palavras = [re.sub(r"\s+", "", p) for p in re.split(r"\s{2,}", linha_bruta.strip())]
+        palavras = [p for p in palavras if p]
+        if palavras and not _tem_palavra_nao_nome(" ".join(palavras)):
+            return palavras
+    return None
+
+
+def _itens_do_cabecalho(texto: str, limite: int = 12) -> list:
+    """Primeiras linhas úteis do currículo como lista de (tipo, valor).
+
+    PDFs de duas colunas juntam, na mesma linha, texto das duas colunas
+    separado por vários espaços; cada coluna vira um item. Linhas de
+    localização são descartadas aqui (bloco de contato costuma vir antes do
+    nome)."""
+    itens = []
+    for bruta in texto.splitlines():
+        bruta = bruta.strip()
+        if not bruta:
+            continue
+        espacadas = _letras_espacadas(bruta)
+        if espacadas:
+            itens.append(("espacado", espacadas))
+            continue
+        for coluna in re.split(r"\s{3,}|\t|\s*[|•·●]\s*", bruta):
+            coluna = coluna.strip()
+            if not coluna or _parece_localizacao(coluna):
+                continue
+            limpa = _limpar_linha(coluna)
+            if limpa:
+                itens.append(("texto", limpa))
+    return itens[:limite]
+
+
 def extrair_nome(texto: str, nome_arquivo: str = "") -> str:
-    linhas_raw = [l.strip() for l in texto.splitlines() if l.strip()]
+    itens = _itens_do_cabecalho(texto)
 
-    # --- CORREÇÃO PRINCIPAL ---
-    # Filtra localização ANTES de limpar a linha, usando o texto original.
-    # PDFs com duas colunas colocam o bloco de contato (cidade, telefone)
-    # antes do nome. Essa pré-filtragem garante que "Jardim Alvorada - Cambé/PR"
-    # seja descartado independente de encoding ou versão do pdfplumber.
-    linhas_raw = [l for l in linhas_raw if not _parece_localizacao(l)]
+    # 1) Passe estrito, na ordem em que as linhas aparecem
+    for i, (tipo, valor) in enumerate(itens):
+        if tipo == "espacado":
+            if len(valor) == 1:
+                return _nome_do_arquivo(nome_arquivo) or _formatar_nome(valor[0])
+            return _formatar_nome(" ".join(valor))
 
-    linhas = [_limpar_linha(l) for l in linhas_raw]
-    linhas = [l for l in linhas if l]
+        nome = _validar_nome_na_linha(valor, estrito=True)
+        if nome:
+            return nome
 
-    candidatos_validos = []
-    i = 0
-    while i < min(12, len(linhas)):
-        linha = linhas[i]
+        # Nome partido em duas linhas: "Giulia" / "Santos"
+        if (len(valor.split()) == 1 and i + 1 < len(itens) and itens[i + 1][0] == "texto"):
+            proxima = itens[i + 1][1]
+            if len(proxima.split()) == 1:
+                partido = _validar_nome(f"{valor} {proxima}", estrito=True)
+                if partido:
+                    return partido
 
-        if REGEX_EMAIL.search(linha):
-            i += 1; continue
-        if any(c.isdigit() for c in linha):
-            i += 1; continue
-        if _parece_rotulo_de_secao(linha):
-            i += 1; continue
-        if _parece_dado_pessoal(linha):
-            i += 1; continue
-        if _parece_cargo_objetivo(linha):
-            i += 1; continue
-        if _parece_localizacao(linha):
-            i += 1; continue
-
-        palavras = linha.split()
-
-        # Caso Bruno: "B R U N O C A R V A L H A E S"
-        if len(palavras) >= 4 and all(len(p) == 1 and p.isalpha() for p in palavras):
-            nome_arq = _nome_do_arquivo(nome_arquivo)
-            candidatos_validos.append(nome_arq if nome_arq else "".join(palavras).title())
-            i += 1; continue
-
-        # Caso Giulia: nome partido em duas linhas
-        if (len(palavras) == 1 and palavras[0][0].isupper() and palavras[0].isalpha()
-                and i + 1 < len(linhas)):
-            proxima = linhas[i + 1]
-            pp = proxima.split()
-            if (len(pp) == 1 and pp[0][0].isupper() and pp[0].isalpha()
-                    and not _parece_rotulo_de_secao(proxima)
-                    and not _parece_dado_pessoal(proxima)
-                    and not _parece_cargo_objetivo(proxima)):
-                candidatos_validos.append(f"{palavras[0]} {pp[0]}".title())
-                i += 2; continue
-
-        # Caso geral: nome com 2-6 palavras, iniciais maiúsculas
-        if (1 < len(palavras) <= 6 and all(
-                p[0].isupper() for p in palavras
-                if p.isalpha() and p.lower() not in PREPOSICOES_NOME
-        )):
-            candidatos_validos.append(linha.title())
-            i += 1; continue
-
-        i += 1
-
-    if candidatos_validos:
-        return candidatos_validos[0]
-
+    # 2) Nome do arquivo
     nome_arq = _nome_do_arquivo(nome_arquivo)
     if nome_arq:
         return nome_arq
 
-    for linha in linhas:
-        if (not _parece_rotulo_de_secao(linha)
-                and not _parece_dado_pessoal(linha)
-                and not _parece_cargo_objetivo(linha)):
-            return linha.title()
+    # 3) Passe relaxado (nome em minúsculas ou de uma palavra só). Correção: o
+    # fallback antigo devolvia "a primeira linha que sobrasse" — que podia ser
+    # o e-mail ("Ana@X.Com"), o telefone ou um endereço. Agora a linha precisa
+    # passar nas mesmas validações; sem candidato, devolve "Não identificado".
+    for tipo, valor in itens:
+        if tipo != "texto":
+            continue
+        nome = _validar_nome_na_linha(valor, estrito=False)
+        if nome:
+            return nome
 
     return "Não identificado"
 
+
+# ---------------------------------------------------------------------------
+# Demais campos
+# ---------------------------------------------------------------------------
 
 def extrair_email(texto: str):
     m = REGEX_EMAIL.search(texto)
     return m.group(0) if m else None
 
 
+_ANO = r"(?:19|20)\d{2}"
+
+
 def extrair_telefone(texto: str):
-    m = REGEX_TELEFONE.search(texto)
-    return m.group(0).strip() if m else None
+    """Correção: o regex devolvia o primeiro grupo de 8 dígitos do texto —
+    '2018-2020' (período de um emprego) virava o telefone do candidato quando
+    aparecia antes do telefone de verdade. Agora intervalos de anos são
+    descartados e números com DDD têm preferência."""
+    candidatos = []
+    for m in REGEX_TELEFONE.finditer(texto):
+        bruto = m.group(0).strip()
+        digitos = re.sub(r"\D", "", bruto)
+        if re.fullmatch(_ANO + r"\D*" + _ANO, bruto):
+            continue
+        if 8 <= len(digitos) <= 13:
+            candidatos.append((bruto, digitos))
+    for bruto, digitos in candidatos:
+        if len(digitos) >= 10:
+            return bruto
+    return candidatos[0][0] if candidatos else None
 
 
 def extrair_linkedin(texto: str):
@@ -338,29 +581,110 @@ def extrair_cidade(texto: str):
 
 def extrair_formacao(texto: str):
     texto_norm = normalizar_texto(texto)
-    nivel = next((v for k, v in NIVEIS_FORMACAO_ORDENADO if k in texto_norm), None)
-    area = next((a.title() for a in AREAS_FORMACAO if a in texto_norm), None)
+    nivel = next((v for padrao, v in _NIVEIS_FORMACAO_REGEX if padrao.search(texto_norm)), None)
+    area = next((v for padrao, v in _AREAS_FORMACAO_REGEX if padrao.search(texto_norm)), None)
     return nivel, area
 
 
-def extrair_idiomas(texto: str):
-    texto_norm = normalizar_texto(texto)
-    idiomas_encontrados = {}
-    janela_maxima = 25
+_NIVEIS_IDIOMA_TODOS = {
+    **NIVEIS_IDIOMA,
+    "basic": "Básico", "intermediate": "Intermediário", "advanced": "Avançado",
+    "fluent": "Fluente", "native": "Nativo",
+}
+_TITULO_IDIOMAS = re.compile(
+    r"^(?:conhecimentos?\s+de\s+)?(?:idiomas?|linguas?|languages?)(?:\s+[a-z]+){0,2}$"
+)
+_IDIOMAS_NA_MESMA_LINHA = re.compile(r"^\W*(?:idiomas?|linguas?|languages?)\s*[:\-–]\s*(.+)$")
+_SEPARADOR_IDIOMAS = re.compile(r"[,;/|•·]")
 
-    for chave_idioma, nome_idioma in IDIOMAS_CONHECIDOS.items():
-        if chave_idioma not in texto_norm:
+
+def _linhas_secao_idiomas(texto: str):
+    """Linhas (normalizadas) da seção de idiomas, ou None se não houver.
+    Reconhece o título sozinho ('Idiomas') e 'Idiomas: Inglês avançado'."""
+    achou, dentro, linhas = False, False, []
+    for linha in texto.splitlines():
+        norm = normalizar_texto(linha)
+        titulo = normalizar_texto(re.sub(r"^[^\w]+", "", linha)).rstrip(" :.-").strip()
+        if titulo and len(titulo) <= 40 and _TITULO_IDIOMAS.match(titulo):
+            achou = dentro = True
             continue
-        idx = texto_norm.find(chave_idioma)
-        trecho = texto_norm[idx + len(chave_idioma): idx + len(chave_idioma) + janela_maxima]
-        melhor_nivel, melhor_posicao = None, None
-        for chave_nivel, nome_nivel in NIVEIS_IDIOMA.items():
-            posicao = trecho.find(chave_nivel)
-            if posicao != -1 and (melhor_posicao is None or posicao < melhor_posicao):
-                melhor_posicao = posicao
-                melhor_nivel = nome_nivel
-        idiomas_encontrados[nome_idioma] = melhor_nivel or "Não especificado"
-    return idiomas_encontrados
+        m = _IDIOMAS_NA_MESMA_LINHA.match(norm)
+        if m:
+            achou = dentro = True
+            linhas.append(m.group(1))
+            continue
+        if dentro:
+            if _tipo_titulo(linha):  # começou outra seção
+                dentro = False
+            elif norm:
+                linhas.append(norm)
+    return linhas if achou else None
+
+
+def _nivel_do_idioma(seg: str, inicio: int, fim: int, depois: int, antes: int):
+    """Nível mais próximo do idioma no trecho: até `depois` caracteres após
+    o nome ('Inglês - Avançado') ou `antes` caracteres antes ('Fluente em inglês')."""
+    melhor, melhor_dist = None, None
+    for chave, nome in _NIVEIS_IDIOMA_TODOS.items():
+        for m in re.finditer(r"(?<![a-z])" + chave, seg):
+            if m.start() >= fim:
+                dist, limite = m.start() - fim, depois
+            elif m.end() <= inicio:
+                dist, limite = inicio - m.end(), antes
+            else:
+                continue
+            if dist <= limite and (melhor_dist is None or dist < melhor_dist):
+                melhor, melhor_dist = nome, dist
+    return melhor
+
+
+def extrair_idiomas(texto: str):
+    """Idiomas do candidato.
+
+    Correção: antes bastava a palavra 'Inglês' aparecer em QUALQUER lugar do
+    texto (ex.: 'atendimento a clientes ingleses', 'curso de inglês' em outro
+    contexto, uma vaga descrita) para o candidato ganhar o idioma — e 40
+    pontos de 'Não especificado'. Agora:
+      - Dentro da seção 'Idiomas': citar o idioma basta (nível, se vier junto).
+      - Fora dela: só conta se o NÍVEL vier colado ao nome ('Inglês avançado',
+        'Fluente em espanhol')."""
+    resultado = {}
+    secao = _linhas_secao_idiomas(texto)
+
+    def _processar(linhas, exige_nivel):
+        pendente = None  # idioma visto sem nível; o nível pode vir no trecho seguinte
+        for linha in linhas:
+            for seg in _SEPARADOR_IDIOMAS.split(linha):
+                achou_idioma = False
+                for chave, nome in IDIOMAS_CONHECIDOS.items():
+                    m = _regex_palavra_inteira(chave).search(seg)
+                    if not m:
+                        continue
+                    achou_idioma = True
+                    nivel = _nivel_do_idioma(
+                        seg, m.start(), m.end(),
+                        depois=25 if not exige_nivel else 15,
+                        antes=8,
+                    )
+                    if nivel:
+                        resultado[nome] = nivel
+                        pendente = None
+                    elif not exige_nivel:
+                        resultado.setdefault(nome, "Não especificado")
+                        pendente = nome
+                if not achou_idioma and pendente and resultado.get(pendente) == "Não especificado":
+                    # idioma e nível em linhas/trechos separados ("Inglês" / "Avançado")
+                    soltos = [n for k, n in _NIVEIS_IDIOMA_TODOS.items() if re.search(r"(?<![a-z])" + k, seg)]
+                    if soltos and len(seg.split()) <= 3:
+                        resultado[pendente] = soltos[0]
+                        pendente = None
+
+    if secao is not None:
+        _processar(secao, exige_nivel=False)
+    _processar([normalizar_texto(l) for l in texto.splitlines() if l.strip()], exige_nivel=True)
+
+    # mantém a ordem canônica dos idiomas
+    return {nome: resultado[nome] for nome in IDIOMAS_CONHECIDOS.values() if nome in resultado}
 
 
 def extrair_competencias(texto: str, palavras_chave: list):
@@ -374,31 +698,85 @@ def extrair_competencias(texto: str, palavras_chave: list):
     return encontradas, evidencias
 
 
-PADRAO_INICIO_EXPERIENCIA = re.compile(
-    r"(experi[êe]ncias?\s+profission(al|ais)|hist[óo]rico\s+profissional|"
-    r"atua[çc][ãa]o\s+profissional|vida\s+profissional|experi[êe]ncias?\s+de\s+trabalho)",
-    re.IGNORECASE
+# ---------------------------------------------------------------------------
+# Experiência profissional
+# ---------------------------------------------------------------------------
+
+# Títulos de seção são reconhecidos só quando ocupam a LINHA INTEIRA. Antes,
+# o fim da seção de experiência era a primeira ocorrência de "habilidades",
+# "competências", "formação", "cursos"... em QUALQUER lugar do texto — mesmo
+# no meio de uma frase ("desenvolvi habilidades de comunicação") — e os
+# empregos seguintes eram descartados (um currículo de 7 anos saía com 1 ano
+# e 11 meses).
+_TITULO_EXPERIENCIA = re.compile(
+    r"^(?:experiencias?(?:\s+(?:profissionais?|de\s+trabalho|anteriores?))?|"
+    r"historico\s+profissional|atuacao\s+profissional|vida\s+profissional|"
+    r"trajetoria\s+profissional|carreira(?:\s+profissional)?|"
+    r"(?:work|professional)\s+experience|experience|employment\s+history)$"
+)
+_TITULO_FORMACAO = re.compile(
+    r"^(?:formacao|educacao|escolaridade|dados\s+academicos|cursos?|idiomas?|"
+    r"certificacoes?|certificados?|experiencias?\s+(?:extracurriculares?|academicas?)|"
+    r"atividades\s+(?:extracurriculares|complementares)|entidades\s+estudantis|"
+    r"voluntariado|projetos\s+(?:sociais|academicos)|education|courses|"
+    r"certifications|languages)(?:\s+[a-z]+){0,3}$"
+)
+_TITULO_OUTRO = re.compile(
+    r"^(?:objetivos?|resumo|perfil|sobre\s+mim|apresentacao|dados\s+pessoais|"
+    r"informacoes\s+(?:pessoais|adicionais|complementares)|contato|habilidades|"
+    r"competencias|qualificacoes|referencias|projetos|publicacoes|premios|"
+    r"skills|summary|profile|references)(?:\s+[a-z]+){0,3}$"
 )
 
-PADRAO_FIM_EXPERIENCIA = re.compile(
-    r"(forma[çc][ãa]o(\s+acad[êe]mica)?|educa[çc][ãa]o|idiomas|cursos(\s+e\s+certifica[çc][õo]es)?|"
-    r"certifica[çc][õo]es|habilidades|compet[êe]ncias|informa[çc][õo]es\s+adicionais|"
-    r"refer[êe]ncias|entidades\s+estudantis|atividades\s+(extracurriculares|complementares)|"
-    r"experi[êe]ncias?\s+extracurricular(es)?|experi[êe]ncias?\s+acad[êe]mica(s)?|"
-    r"voluntariado|projetos\s+(sociais|acad[êe]micos))",
-    re.IGNORECASE
-)
+
+def _tipo_titulo(linha: str):
+    ln = normalizar_texto(re.sub(r"^[^\w]+", "", linha)).rstrip(" :.-").strip()
+    if not ln or len(ln) > 60:
+        return None
+    if _TITULO_EXPERIENCIA.match(ln):
+        return "exp"
+    if _TITULO_FORMACAO.match(ln):
+        return "formacao"
+    if _TITULO_OUTRO.match(ln):
+        return "outro"
+    return None
 
 
 def isolar_secao_experiencia(texto: str) -> str:
-    match_inicio = PADRAO_INICIO_EXPERIENCIA.search(texto)
-    if not match_inicio:
-        return texto
-    inicio_secao = match_inicio.end()
-    match_fim = PADRAO_FIM_EXPERIENCIA.search(texto, pos=inicio_secao)
-    fim_secao = match_fim.start() if match_fim else len(texto)
-    trecho = texto[inicio_secao:fim_secao].strip()
-    return trecho if trecho else texto
+    """Devolve só o trecho de experiência profissional.
+
+    - Com título de experiência: o conteúdo até o próximo título de seção.
+    - Sem título de experiência: o texto inteiro MENOS as seções de formação/
+      cursos/idiomas (antes os anos da faculdade eram somados como emprego).
+    - Sem nenhum título reconhecido (ou trecho vazio): o texto inteiro."""
+    linhas = texto.splitlines()
+    tipos = [_tipo_titulo(ln) for ln in linhas]
+
+    if "exp" in tipos:
+        selecionadas, dentro = [], False
+        for linha, tipo in zip(linhas, tipos):
+            if tipo == "exp":
+                dentro = True
+            elif tipo:
+                dentro = False
+            elif dentro:
+                selecionadas.append(linha)
+        trecho = "\n".join(selecionadas).strip()
+        return trecho or texto
+
+    if "formacao" in tipos:
+        selecionadas, ignorar = [], False
+        for linha, tipo in zip(linhas, tipos):
+            if tipo == "formacao":
+                ignorar = True
+            elif tipo:
+                ignorar = False
+            elif not ignorar:
+                selecionadas.append(linha)
+        trecho = "\n".join(selecionadas).strip()
+        return trecho or texto
+
+    return texto
 
 
 def calcular_experiencia_total(texto: str):
@@ -414,6 +792,68 @@ def calcular_experiencia_total(texto: str):
 
     total_meses = calcular_meses_experiencia(periodos_validos)
     return total_meses, formatar_experiencia(total_meses)
+
+
+# ---------------------------------------------------------------------------
+# Cargos exercidos
+# ---------------------------------------------------------------------------
+
+# Palavras (sem acento) que identificam um cargo. "caixa" ficou de fora de
+# propósito: casaria com "Caixa Econômica Federal" (a empresa, não o cargo).
+_PALAVRAS_CARGO = {
+    "analista", "assistente", "auxiliar", "gerente", "coordenador", "coordenadora",
+    "supervisor", "supervisora", "diretor", "diretora", "estagiario", "estagiaria",
+    "consultor", "consultora", "vendedor", "vendedora", "atendente", "operador",
+    "operadora", "tecnico", "tecnica", "desenvolvedor", "desenvolvedora",
+    "engenheiro", "engenheira", "programador", "programadora", "recepcionista",
+    "motorista", "administrador", "administradora", "contador", "contadora",
+    "advogado", "advogada", "secretario", "secretaria", "comprador", "compradora",
+    "representante", "promotor", "promotora", "almoxarife", "encarregado",
+    "encarregada", "lider", "aprendiz", "trainee", "especialista", "executivo",
+    "executiva", "gestor", "gestora", "designer", "professor", "professora",
+    "enfermeiro", "enfermeira", "farmaceutico", "farmaceutica", "balconista",
+    "cozinheiro", "cozinheira", "garcom", "mecanico", "eletricista", "pedreiro",
+    "soldador", "montador", "conferente", "repositor", "faxineiro", "faxineira",
+    "vigilante", "porteiro", "zelador", "freelancer", "autonomo", "proprietario",
+}
+
+_SEPARADOR_SEGMENTOS = re.compile(r"\s+[-–—|]\s+|\s*[|•·;:,()]\s*")
+_MAX_CARGOS = 6
+
+
+def extrair_cargos(texto: str) -> list:
+    """Cargos que o candidato exerceu, lidos da seção de experiência.
+
+    Antes o sistema não guardava cargo nenhum, então o filtro 'Cargo' só
+    achava texto que por acaso estivesse no resumo ou no nome. Heurística:
+    em cada linha da experiência (sem as datas), cada trecho curto separado
+    por ' - ', '|', vírgula ou parênteses é um possível cargo se tiver uma
+    palavra de cargo entre as DUAS primeiras palavras — isso descarta frases
+    como 'Auxiliei o analista de contas', onde a palavra vem no meio."""
+    from utils import PADRAO_PERIODO
+
+    cargos, vistos = [], set()
+    for linha in isolar_secao_experiencia(texto).splitlines():
+        linha = linha.strip(" \t•·●-–—*")
+        if not linha or "@" in linha or len(linha.split()) > 14:
+            continue
+        sem_datas = PADRAO_PERIODO.sub(" ", linha)
+        for trecho in _SEPARADOR_SEGMENTOS.split(sem_datas):
+            trecho = re.sub(r"\s+", " ", trecho).strip(" .-–—")
+            palavras = trecho.split()
+            if not 1 <= len(palavras) <= 6 or trecho.endswith("."):
+                continue
+            primeiras = [normalizar_texto(p) for p in palavras[:2]]
+            if not any(p in _PALAVRAS_CARGO for p in primeiras):
+                continue
+            chave = normalizar_texto(trecho)
+            if chave in vistos:
+                continue
+            vistos.add(chave)
+            cargos.append(_formatar_nome(trecho) if trecho.isupper() else trecho)
+            if len(cargos) >= _MAX_CARGOS:
+                return cargos
+    return cargos
 
 
 def processar_curriculo(nome_arquivo: str, arquivo_bytes: bytes, palavras_chave: list = None) -> dict:
@@ -447,6 +887,7 @@ def processar_curriculo(nome_arquivo: str, arquivo_bytes: bytes, palavras_chave:
         "evidencias_competencias": evidencias,
         "experiencia_meses": total_meses,
         "experiencia_formatada": experiencia_formatada,
+        "cargos": extrair_cargos(texto),
         "_texto_bruto_temp": texto,
     }
     return dados

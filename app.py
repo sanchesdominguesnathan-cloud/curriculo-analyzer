@@ -8,6 +8,7 @@ Execução local:
 
 import io
 import os
+import secrets
 
 import streamlit as st
 import pandas as pd
@@ -27,13 +28,28 @@ import parser as curriculo_parser
 import score as score_module
 import ranking
 import forms_import
-from keywords import listar_todas_palavras_chave_sugeridas, BASE_SINONIMOS, PESOS_PADRAO
+from keywords import (
+    listar_todas_palavras_chave_sugeridas,
+    montar_lista_palavras,
+    BASE_SINONIMOS,
+    PESOS_PADRAO,
+)
 from utils import gerar_hash_arquivo, gerar_resumo_candidato
 
 st.set_page_config(page_title="Análise Automática de Currículos", layout="wide")
 
-try:
+@st.cache_resource
+def _inicializar_banco_uma_vez():
+    """O Streamlit reexecuta este arquivo a CADA clique. Rodar o DDL
+    (CREATE/ALTER/INDEX) toda vez custa conexões e pega travas de tabela;
+    com cache_resource ele roda uma vez por processo (e não é cacheado se
+    levantar exceção, então a próxima tentativa refaz)."""
     db.inicializar_banco()
+    return True
+
+
+try:
+    _inicializar_banco_uma_vez()
 except Exception as e:
     st.error(
         "⚠️ Não foi possível conectar ao banco de dados. Verifique se a "
@@ -86,36 +102,26 @@ def tela_login():
     aba_login, aba_cadastro = st.tabs([" Entrar", "🆕 Criar conta"])
 
     with aba_login:
-        # Correção #11: bloqueia após 5 tentativas consecutivas falhas.
-        MAX_TENTATIVAS = 5
-        if st.session_state.tentativas_login >= MAX_TENTATIVAS:
-            st.error(
-                f"⛔ Muitas tentativas de login ({MAX_TENTATIVAS}). "
-                "Recarregue a página para tentar novamente."
-            )
-            if st.button("🔄 Recarregar"):
-                st.session_state.tentativas_login = 0
-                st.rerun()
-            return False
-
+        # Limite de tentativas guardado no BANCO, por e-mail (antes ficava no
+        # session_state e zerava ao abrir outra aba ou recarregar a página).
         with st.form("form_login"):
             email = st.text_input("E-mail")
             senha = st.text_input("Senha", type="password")
             enviar = st.form_submit_button("Entrar", type="primary")
 
         if enviar:
-            empresa = db.autenticar_empresa(email, senha)
+            empresa, espera, restantes = db.tentar_login(email, senha)
             if empresa:
                 st.session_state.empresa_logada = empresa
                 st.session_state.tentativas_login = 0
                 st.rerun()
+            elif espera > 0:
+                st.error(
+                    f"⛔ Muitas tentativas de login. Tente novamente em "
+                    f"{max(1, round(espera / 60))} minuto(s)."
+                )
             else:
-                st.session_state.tentativas_login += 1
-                restantes = MAX_TENTATIVAS - st.session_state.tentativas_login
-                if restantes > 0:
-                    st.error(f"E-mail ou senha incorretos. {restantes} tentativa(s) restante(s).")
-                else:
-                    st.error("Conta bloqueada temporariamente. Recarregue a página.")
+                st.error(f"E-mail ou senha incorretos. {restantes} tentativa(s) restante(s).")
 
     with aba_cadastro:
         codigo_esperado = _obter_codigo_cadastro()
@@ -130,7 +136,16 @@ def tela_login():
             criar = st.form_submit_button("Criar conta")
 
         if criar:
-            if codigo_esperado and codigo_digitado != codigo_esperado:
+            espera_cadastro = db.segundos_de_bloqueio("__cadastro__") if codigo_esperado else 0
+            if espera_cadastro > 0:
+                st.error(
+                    f"⛔ Muitas tentativas com código inválido. Tente novamente em "
+                    f"{max(1, round(espera_cadastro / 60))} minuto(s)."
+                )
+            elif codigo_esperado and not secrets.compare_digest(
+                (codigo_digitado or "").encode("utf-8"), str(codigo_esperado).encode("utf-8")
+            ):
+                db.registrar_falha("__cadastro__")
                 st.error("Código de acesso inválido.")
             elif not nome_empresa.strip() or not email_cadastro.strip():
                 st.error("Preencha o nome da empresa e o e-mail.")
@@ -152,6 +167,10 @@ def tela_login():
 
 def secao_vaga(empresa_id: int):
     st.header(" Pasta da Vaga")
+
+    aviso_exclusao = st.session_state.pop("aviso_vaga_excluida", None)
+    if aviso_exclusao:
+        st.success(aviso_exclusao)
 
     vagas_salvas = db.listar_vagas(empresa_id)
     nomes_vagas = [v["nome"] for v in vagas_salvas]
@@ -187,12 +206,32 @@ def secao_vaga(empresa_id: int):
             st.write("")
             st.write("")
             if st.button("🗑️ Excluir vaga", key="excluir_vaga_btn"):
+                st.session_state.confirmar_exclusao_vaga = vaga_ativa["id"]
+                st.rerun()
+
+        # Confirmação em dois passos: excluir uma vaga faz os candidatos dela
+        # deixarem de aparecer (não existe tela de "histórico geral"), então
+        # a mensagem não pode prometer o contrário nem acontecer num clique só.
+        if st.session_state.get("confirmar_exclusao_vaga") == vaga_ativa["id"]:
+            qtd = len(db.listar_curriculos_por_vaga(empresa_id, vaga_ativa["id"]))
+            st.warning(
+                f"Excluir a vaga '{escolha}'? Os {qtd} candidato(s) analisados nela "
+                "deixam de aparecer no sistema. Essa ação não pode ser desfeita."
+            )
+            col_sim, col_nao, _ = st.columns([1, 1, 4])
+            if col_sim.button("Sim, excluir", key="confirma_excluir_vaga", type="primary"):
                 db.excluir_vaga(empresa_id, vaga_ativa["id"])
                 st.session_state.vaga_id_ativa = None
                 st.session_state.ultima_vaga_carregada = None
                 st.session_state.resultados = []
                 st.session_state.df_resultados = pd.DataFrame()
-                st.success(f"Vaga '{escolha}' excluída. Os currículos continuam salvos no histórico geral.")
+                st.session_state.confirmar_exclusao_vaga = None
+                st.session_state.aviso_vaga_excluida = (
+                    f"Vaga '{escolha}' excluída. Os candidatos dela deixaram de aparecer no sistema."
+                )
+                st.rerun()
+            if col_nao.button("Cancelar", key="cancela_excluir_vaga"):
+                st.session_state.confirmar_exclusao_vaga = None
                 st.rerun()
 
     if st.session_state.ultima_vaga_carregada != chave_vaga_atual:
@@ -225,7 +264,7 @@ def secao_vaga(empresa_id: int):
     return vaga_ativa
 
 def secao_importar_forms(empresa_id: int):
-    sheet_id = forms_import.SHEET_IDS_POR_EMPRESA.get(empresa_id)
+    sheet_id = db.obter_sheet_id_forms(empresa_id)
     if not sheet_id:
         return  # essa empresa ainda não tem um Forms configurado
 
@@ -411,7 +450,9 @@ def processar_analise(empresa_id, arquivos, descricao_vaga, cidade_vaga, pesos_o
         st.warning("Envie ao menos um currículo antes de analisar.")
         return
 
-    todas_palavras = list(set(list(pesos_obrigatorias.keys()) + list(pesos_desejaveis.keys())))
+    # Ordem determinística e sem repetição (antes: list(set(...)), cuja ordem
+    # muda a cada reinício e embaralhava as "Principais competências").
+    todas_palavras = montar_lista_palavras(pesos_obrigatorias, pesos_desejaveis)
     if not todas_palavras:
         todas_palavras = listar_todas_palavras_chave_sugeridas()
 
@@ -430,87 +471,85 @@ def processar_analise(empresa_id, arquivos, descricao_vaga, cidade_vaga, pesos_o
     novos_resultados = []
     barra = st.progress(0, text="Iniciando análise...")
 
+    hashes_vistos = {}  # hash -> nome do 1º arquivo com esse conteúdo, neste lote
+
     for i, arquivo in enumerate(arquivos):
         barra.progress((i) / len(arquivos), text=f"Analisando {arquivo.name}...")
-        conteudo_bytes = arquivo.getvalue()
-        hash_arquivo = gerar_hash_arquivo(conteudo_bytes)
 
-        ja_analisado = db.curriculo_ja_analisado(empresa_id, hash_arquivo)
+        # Correção (candidatos "pulando"): TODO o corpo do loop fica dentro de
+        # um try. Antes só ValueError era tratado; um PDF corrompido levanta
+        # PdfminerException e um .docx inválido levanta BadZipFile, que
+        # derrubavam a análise INTEIRA — os arquivos seguintes do lote nunca
+        # eram processados nem salvos, e a tela ficava com resultado parcial.
+        try:
+            conteudo_bytes = arquivo.getvalue()
+            hash_arquivo = gerar_hash_arquivo(conteudo_bytes)
 
-        # Correção #20: mesmo que esse arquivo já tenha sido analisado
-        # antes, o texto é reextraído e a pontuação é SEMPRE recalculada
-        # com os pesos atuais das palavras-chave. Antes, se a recrutadora
-        # ajustava um peso e clicava em "Analisar" de novo sem trocar os
-        # arquivos, o sistema só reaproveitava a pontuação antiga — o
-        # ajuste do peso não tinha nenhum efeito, silenciosamente.
-        #
-        # Isso é feito reextraindo o texto do arquivo recém-enviado (os
-        # bytes já estão em memória nesta mesma chamada), em vez de
-        # depender de um texto bruto salvo no banco — que, de propósito,
-        # não guardamos mais (ver Correção #20 no database.py).
-        texto_extraido = None
-        if ja_analisado:
-            try:
-                texto_extraido = curriculo_parser.extrair_texto(arquivo.name, conteudo_bytes)
-            except Exception:
-                texto_extraido = None
+            # Arquivo idêntico enviado duas vezes no mesmo lote (mesmo
+            # conteúdo, nomes diferentes): processa uma vez e avisa, em vez
+            # de sobrescrever em silêncio o primeiro pelo segundo.
+            if hash_arquivo in hashes_vistos:
+                st.warning(
+                    f"🔁 '{arquivo.name}' tem exatamente o mesmo conteúdo de "
+                    f"'{hashes_vistos[hash_arquivo]}' e foi ignorado."
+                )
+                continue
+            hashes_vistos[hash_arquivo] = arquivo.name
 
-        if ja_analisado and texto_extraido:
-            dados = dict(ja_analisado)  # reaproveita nome/telefone/cidade/idiomas já extraídos
-            dados["_texto_bruto_temp"] = texto_extraido
-        elif ja_analisado:
-            # Não foi possível reler o arquivo agora (ex: arquivo
-            # corrompido nesse reenvio) — mantém o resultado salvo
-            # anteriormente em vez de travar a análise inteira.
-            st.info(
-                f"⏭️ '{arquivo.name}' já havia sido analisado, mas não foi "
-                "possível reler o conteúdo agora — mantendo a pontuação "
-                "salva anteriormente."
-            )
-            ja_analisado["_bytes_download"] = conteudo_bytes
-            novos_resultados.append(ja_analisado)
-            continue
-        else:
+            ja_analisado = db.curriculo_ja_analisado(empresa_id, hash_arquivo, vaga_id)
+
+            # Correção #20 (mantida): a pontuação é SEMPRE recalculada com os
+            # pesos atuais. Correção nova: o currículo também é re-extraído
+            # POR COMPLETO (nome, experiência, competências, formação...).
+            # Antes, num reenvio, o código reaproveitava os dados antigos do
+            # banco (`dict(ja_analisado)`): um nome extraído errado ficava
+            # preso para sempre mesmo depois de corrigir o parser, e o resumo
+            # era regerado em cima de competências/experiência velhas — por
+            # isso o "resumo profissional" aparecia desatualizado ou trocado.
             try:
                 dados = curriculo_parser.processar_curriculo(arquivo.name, conteudo_bytes, todas_palavras)
-            except ValueError as e:
-                st.error(str(e))
+            except Exception as e:
+                if ja_analisado:
+                    st.info(
+                        f"⏭️ '{arquivo.name}' já havia sido analisado, mas não foi "
+                        f"possível reler o conteúdo agora ({e}) — mantendo a "
+                        "pontuação salva anteriormente."
+                    )
+                    ja_analisado["_bytes_download"] = conteudo_bytes
+                    novos_resultados.append(ja_analisado)
+                else:
+                    st.error(f"❌ Não foi possível analisar '{arquivo.name}': {e}")
                 continue
 
-        ajuste = db.calcular_ajuste_aprendizado(empresa_id, dados.get("competencias_encontradas", []))
-        resultado_score = score_module.calcular_score_final(
-            dados, pesos_obrigatorias, pesos_desejaveis, ajuste_aprendizado=ajuste
-        )
-        dados.update(resultado_score)
-        dados["status_automatico"] = resultado_score["status"]
-        dados["resumo"] = gerar_resumo_candidato(dados)
-        dados["hash_arquivo"] = hash_arquivo
+            ajuste = db.calcular_ajuste_aprendizado(empresa_id, dados.get("competencias_encontradas", []))
+            resultado_score = score_module.calcular_score_final(
+                dados, pesos_obrigatorias, pesos_desejaveis, ajuste_aprendizado=ajuste
+            )
+            dados.update(resultado_score)
+            dados["status_automatico"] = resultado_score["status"]
+            dados["resumo"] = gerar_resumo_candidato(dados)
+            dados["hash_arquivo"] = hash_arquivo
 
-        # Correção #19: se esse candidato já tinha recebido uma decisão
-        # manual do recrutador (Aprovado/Talvez/Reprovado), ela continua
-        # valendo mesmo depois de recalcular a pontuação automática — só
-        # o "status_automatico" é que reflete o novo cálculo.
-        if ja_analisado and ja_analisado.get("decisao_manual"):
-            dados["status"] = ja_analisado["decisao_manual"]
-            dados["decisao_manual"] = ja_analisado["decisao_manual"]
+            # Correção #19: a decisão manual do recrutador continua valendo
+            # depois de recalcular a pontuação automática.
+            if ja_analisado and ja_analisado.get("decisao_manual"):
+                dados["status"] = ja_analisado["decisao_manual"]
+                dados["decisao_manual"] = ja_analisado["decisao_manual"]
 
-        # Correção #4: bytes do arquivo ficam apenas no campo
-        # _bytes_download, usados só pro botão de download nesta mesma
-        # sessão — nunca são persistidos no banco.
-        dados["_bytes_download"] = conteudo_bytes
+            # Bytes só para o botão de download desta sessão — nunca vão ao banco.
+            dados["_bytes_download"] = conteudo_bytes
 
-        # Correção #20: remove o texto bruto ANTES de chamar
-        # salvar_curriculo — antes essa linha vinha DEPOIS do salvamento,
-        # o que não tinha efeito nenhum (o dado já tinha sido serializado
-        # e enviado pro banco). Mesmo com o database.py agora blindado
-        # contra esse campo (defesa em profundidade), a ordem correta
-        # aqui evita depender só da proteção do outro arquivo.
-        dados.pop("_texto_bruto_temp", None)
+            # Remove o texto bruto ANTES de salvar (defesa em profundidade;
+            # o database.py também filtra esse campo).
+            dados.pop("_texto_bruto_temp", None)
 
-        id_banco = db.salvar_curriculo(empresa_id, hash_arquivo, arquivo.name, dados, descricao_vaga, vaga_id=vaga_id)
-        dados["_id_banco"] = id_banco
+            id_banco = db.salvar_curriculo(empresa_id, hash_arquivo, arquivo.name, dados, descricao_vaga, vaga_id=vaga_id)
+            dados["_id_banco"] = id_banco
 
-        novos_resultados.append(dados)
+            novos_resultados.append(dados)
+        except Exception as e:  # noqa: BLE001 — um arquivo ruim não pode parar o lote
+            st.error(f"❌ Falha inesperada ao processar '{arquivo.name}': {e}")
+            continue
 
     barra.progress(1.0, text="Análise concluída!")
 
@@ -588,7 +627,12 @@ def _registrar_decisao_manual(id_banco: int, decisao: str, candidato_original: d
     session_state e recalculamos `df_resultados` na hora, em vez de
     depender de o usuário recarregar a vaga manualmente para ver o
     resultado."""
-    db.registrar_decisao(id_banco, decisao)
+    empresa_logada = st.session_state.get("empresa_logada") or {}
+    try:
+        db.registrar_decisao(empresa_logada.get("id"), id_banco, decisao)
+    except (PermissionError, ValueError) as e:
+        st.error(f"Não foi possível registrar a decisão: {e}")
+        return
 
     if candidato_original is not None:
         candidato_original["status"] = decisao
@@ -630,6 +674,7 @@ def secao_resultados(df_filtrado: pd.DataFrame):
         "Idiomas",
         "Cidade",
         "Alerta",
+        "Duplicidade",
         "Status",
     ]
 
@@ -667,6 +712,8 @@ def secao_resultados(df_filtrado: pd.DataFrame):
 
             with colA:
                 st.markdown(f"**Resumo:** {linha['Resumo']}")
+                if linha.get("Cargos"):
+                    st.markdown(f"**Cargos:** {linha['Cargos']}")
                 st.markdown(
                     f"**Email:** {linha['Email']} | "
                     f"**Telefone:** {linha['Telefone']}"

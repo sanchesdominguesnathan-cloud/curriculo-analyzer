@@ -38,13 +38,14 @@ from parser import (
     extrair_idiomas,
     extrair_competencias,
     calcular_experiencia_total,
+    extrair_cargos,
     extrair_linkedin,
     extrair_email,
     extrair_telefone,
     extrair_cidade,
 )
 from utils import gerar_hash_arquivo, gerar_resumo_candidato, normalizar_texto
-from keywords import listar_todas_palavras_chave_sugeridas
+from keywords import listar_todas_palavras_chave_sugeridas, montar_lista_palavras
 
 
 # ---------------------------------------------------------------------------
@@ -52,14 +53,15 @@ from keywords import listar_todas_palavras_chave_sugeridas
 # ---------------------------------------------------------------------------
 # Cada empresa cliente tem seu próprio Google Form (e portanto sua própria
 # planilha de respostas) — isso garante isolamento entre empresas mesmo que
-# um recrutador erre algum campo do formulário. Atualize esse dicionário
-# manualmente sempre que criar um Form novo pra uma empresa nova.
+# um recrutador erre algum campo do formulário.
+#
+# O ID da planilha fica na coluna `empresas.forms_sheet_id` do banco (antes
+# era um dicionário fixo aqui, o que exigia alterar o código e fazer deploy a
+# cada cliente novo, e deixava os IDs no repositório). Para configurar:
+#     UPDATE empresas SET forms_sheet_id = '<id>' WHERE id = <empresa_id>;
+# ou, em Python:  database.definir_sheet_id_forms(empresa_id, "<id>")
 #
 # Como pegar o sheet_id: é o trecho da URL entre "/d/" e "/edit".
-SHEET_IDS_POR_EMPRESA = {
-    1: "11PTdjVSPDFwseWn1_Pdck1f9eZSma01bGBxzqZ4mcOc", #Teste da entrada do forms
-    4: "1us94IgHDSjmZsFMHBGZw-rfZDMf_4z1IEi7BN9kcLEU", #Gabriela 
-}
 
 
 ESCOPOS = [
@@ -162,7 +164,7 @@ def _montar_dados_candidato(linha_normalizada: dict, vaga: dict):
 
     palavras_obrigatorias = vaga.get("obrigatorias", {}) if vaga else {}
     palavras_desejaveis = vaga.get("desejaveis", {}) if vaga else {}
-    todas_palavras = list(set(list(palavras_obrigatorias.keys()) + list(palavras_desejaveis.keys())))
+    todas_palavras = montar_lista_palavras(palavras_obrigatorias, palavras_desejaveis)
     if not todas_palavras:
         todas_palavras = listar_todas_palavras_chave_sugeridas()
 
@@ -190,6 +192,7 @@ def _montar_dados_candidato(linha_normalizada: dict, vaga: dict):
         "evidencias_competencias": evidencias,
         "experiencia_meses": total_meses,
         "experiencia_formatada": experiencia_formatada,
+        "cargos": extrair_cargos(texto),
         "_texto_bruto_temp": texto,
         "_origem": "google_forms",
     }
@@ -227,11 +230,20 @@ def importar_candidaturas_forms(empresa_id: int, sheet_id: str) -> dict:
 
         # Hash de deduplicação: como não existe arquivo físico pra gerar
         # hash de bytes (como no upload normal), usamos o timestamp da
-        # submissão + email como identificador único e estável da linha.
-        chave_dedup = f"{_texto(_valor(linha, COLUNA_TIMESTAMP))}|{dados.get('email', '')}"
+        # submissão + o TEXTO do currículo colado.
+        #
+        # Correção: a chave antiga era timestamp|e-mail. Se a recrutadora
+        # corrigisse o e-mail (ou ele estivesse vazio e depois fosse
+        # preenchido) na planilha, a chave mudava e a linha era importada
+        # de novo — candidato DUPLICADO. O texto do currículo é o campo que
+        # ninguém edita depois, então é a âncora estável. O candidato ainda
+        # pode ser recebido mais de uma vez pelo Forms (reenvio do currículo):
+        # nesse caso a tabela de resultados sinaliza "Possível duplicado".
+        texto_norm = normalizar_texto(_texto(_valor(linha, COLUNA_TEXTO)))
+        chave_dedup = f"{_texto(_valor(linha, COLUNA_TIMESTAMP))}|{texto_norm}"
         hash_arquivo = gerar_hash_arquivo(chave_dedup.encode("utf-8"))
 
-        ja_existe = db.curriculo_ja_analisado(empresa_id, hash_arquivo)
+        ja_existe = db.curriculo_ja_analisado(empresa_id, hash_arquivo, vaga_id)
         if ja_existe:
             continue  # já importado numa sincronização anterior
 
